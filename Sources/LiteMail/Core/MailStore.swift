@@ -1,0 +1,440 @@
+import Foundation
+import GRDB
+
+/// Actor that owns all SQLite/GRDB access. Serial access prevents write conflicts.
+/// Uses WAL mode for concurrent reads during sync.
+actor MailStore {
+    private let dbPool: DatabasePool
+
+    init(path: String) throws {
+        var config = Configuration()
+        config.prepareDatabase { db in
+            // Cap page cache at 2MB (512 pages * 4KB)
+            try db.execute(sql: "PRAGMA cache_size = -2000")
+            // WAL mode for concurrent read/write
+            try db.execute(sql: "PRAGMA journal_mode = WAL")
+            // Enable foreign keys
+            try db.execute(sql: "PRAGMA foreign_keys = ON")
+        }
+        dbPool = try DatabasePool(path: path, configuration: config)
+        try migrate()
+    }
+
+    // MARK: - Migrations
+
+    private nonisolated func migrate() throws {
+        var migrator = DatabaseMigrator()
+
+        migrator.registerMigration("v1_initial") { db in
+            // Headers table (~200 bytes/row)
+            try db.create(table: "emails") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("message_id", .text).notNull().unique()
+                t.column("thread_id", .text)
+                t.column("folder", .text).notNull().defaults(to: "INBOX")
+                t.column("sender_name", .text)
+                t.column("sender_email", .text).notNull()
+                t.column("recipients", .text)       // JSON array
+                t.column("subject", .text)
+                t.column("date", .integer).notNull()
+                t.column("is_read", .integer).notNull().defaults(to: 0)
+                t.column("is_starred", .integer).notNull().defaults(to: 0)
+                t.column("is_deleted", .integer).notNull().defaults(to: 0)
+                t.column("has_attachments", .integer).notNull().defaults(to: 0)
+                t.column("uid", .integer)
+                t.column("flags", .text)
+                t.column("references_header", .text)
+                t.column("in_reply_to", .text)
+                t.column("created_at", .integer)
+            }
+
+            try db.create(index: "idx_emails_thread", on: "emails", columns: ["thread_id"])
+            try db.create(index: "idx_emails_folder", on: "emails", columns: ["folder"])
+            try db.create(index: "idx_emails_date", on: "emails", columns: ["date"])
+            try db.create(index: "idx_emails_sender", on: "emails", columns: ["sender_email"])
+
+            // Bodies table (loaded on demand)
+            try db.create(table: "email_bodies") { t in
+                t.primaryKey("email_id", .integer)
+                    .references("emails", onDelete: .cascade)
+                t.column("body_text", .text)
+                t.column("body_html", .text)
+            }
+
+            // FTS5 full-text search index
+            try db.execute(sql: """
+                CREATE VIRTUAL TABLE email_fts USING fts5(
+                    subject, body_text, sender_name, sender_email,
+                    tokenize='unicode61'
+                )
+            """)
+
+            // Labels
+            try db.create(table: "labels") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("email_id", .integer).notNull()
+                    .references("emails", onDelete: .cascade)
+                t.column("label", .text).notNull()
+            }
+            try db.create(index: "idx_labels_email", on: "labels", columns: ["email_id"])
+            try db.create(index: "idx_labels_label", on: "labels", columns: ["label"])
+
+            // Attachments
+            try db.create(table: "attachments") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("email_id", .integer).notNull()
+                    .references("emails", onDelete: .cascade)
+                t.column("filename", .text)
+                t.column("mime_type", .text)
+                t.column("size_bytes", .integer)
+                t.column("content_id", .text)
+                t.column("cache_path", .text)
+            }
+
+            // Outbox for offline compose
+            try db.create(table: "outbox") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("to_recipients", .text).notNull()
+                t.column("cc_recipients", .text)
+                t.column("bcc_recipients", .text)
+                t.column("subject", .text)
+                t.column("body_text", .text)
+                t.column("body_html", .text)
+                t.column("in_reply_to", .text)
+                t.column("created_at", .integer)
+                t.column("status", .text).notNull().defaults(to: "queued")
+            }
+
+            // Sync state tracking
+            try db.create(table: "sync_state") { t in
+                t.primaryKey("folder", .text)
+                t.column("uid_validity", .integer)
+                t.column("last_uid", .integer)
+                t.column("last_sync", .integer)
+            }
+        }
+
+        try migrator.migrate(dbPool)
+    }
+
+    // MARK: - Email CRUD
+
+    func insertEmail(_ record: EmailRecord) throws -> Int64 {
+        try dbPool.write { db in
+            try record.insert(db)
+            let emailId = db.lastInsertedRowID
+
+            // Insert into FTS index
+            try db.execute(
+                sql: """
+                    INSERT INTO email_fts(rowid, subject, body_text, sender_name, sender_email)
+                    VALUES (?, ?, ?, ?, ?)
+                """,
+                arguments: [emailId, record.subject, nil, record.senderName, record.senderEmail]
+            )
+
+            return emailId
+        }
+    }
+
+    func insertBody(emailId: Int64, text: String?, html: String?) throws {
+        try dbPool.write { db in
+            try db.execute(
+                sql: "INSERT OR REPLACE INTO email_bodies (email_id, body_text, body_html) VALUES (?, ?, ?)",
+                arguments: [emailId, text, html]
+            )
+
+            // Update FTS index with body text
+            try db.execute(
+                sql: "DELETE FROM email_fts WHERE rowid = ?",
+                arguments: [emailId]
+            )
+
+            // Re-fetch header info for FTS
+            let row = try Row.fetchOne(db, sql: "SELECT subject, sender_name, sender_email FROM emails WHERE id = ?", arguments: [emailId])
+            if let row {
+                try db.execute(
+                    sql: """
+                        INSERT INTO email_fts(rowid, subject, body_text, sender_name, sender_email)
+                        VALUES (?, ?, ?, ?, ?)
+                    """,
+                    arguments: [emailId, row["subject"], text, row["sender_name"], row["sender_email"]]
+                )
+            }
+        }
+    }
+
+    func fetchHeaders(folder: String, offset: Int, limit: Int) throws -> [EmailRecord] {
+        try dbPool.read { db in
+            try EmailRecord
+                .filter(Column("folder") == folder && Column("is_deleted") == false)
+                .order(Column("date").desc)
+                .limit(limit, offset: offset)
+                .fetchAll(db)
+        }
+    }
+
+    func fetchBody(emailId: Int64) throws -> (text: String?, html: String?)? {
+        try dbPool.read { db in
+            let row = try Row.fetchOne(
+                db,
+                sql: "SELECT body_text, body_html FROM email_bodies WHERE email_id = ?",
+                arguments: [emailId]
+            )
+            guard let row else { return nil }
+            return (text: row["body_text"], html: row["body_html"])
+        }
+    }
+
+    func fetchThread(threadId: String) throws -> [EmailRecord] {
+        try dbPool.read { db in
+            try EmailRecord
+                .filter(Column("thread_id") == threadId)
+                .order(Column("date").asc)
+                .fetchAll(db)
+        }
+    }
+
+    // MARK: - Search
+
+    func search(query: String) throws -> [EmailRecord] {
+        guard !query.trimmingCharacters(in: .whitespaces).isEmpty else {
+            return []
+        }
+
+        return try dbPool.read { db in
+            // Escape double quotes for FTS5 query syntax
+            let escapedQuery = query
+                .replacingOccurrences(of: "\"", with: "\"\"")
+
+            // Two-step query: FTS5 returns rowids fast, then batch-fetch records
+            let rowids = try Int64.fetchAll(db, sql: """
+                SELECT rowid FROM email_fts WHERE email_fts MATCH ? LIMIT 100
+            """, arguments: ["\"\(escapedQuery)\""])
+
+            guard !rowids.isEmpty else { return [] }
+
+            return try EmailRecord
+                .filter(rowids.contains(Column("id")))
+                .order(Column("date").desc)
+                .fetchAll(db)
+        }
+    }
+
+    /// Pre-warm FTS5 page cache with a dummy query on launch.
+    func warmSearchCache() throws {
+        _ = try dbPool.read { db in
+            try Row.fetchOne(db, sql: "SELECT count(*) FROM email_fts WHERE email_fts MATCH '\"warmup\"'")
+        }
+    }
+
+    // MARK: - Actions
+
+    func markRead(emailId: Int64, read: Bool) throws {
+        try dbPool.write { db in
+            try db.execute(
+                sql: "UPDATE emails SET is_read = ? WHERE id = ?",
+                arguments: [read ? 1 : 0, emailId]
+            )
+        }
+    }
+
+    func markStarred(emailId: Int64, starred: Bool) throws {
+        try dbPool.write { db in
+            try db.execute(
+                sql: "UPDATE emails SET is_starred = ? WHERE id = ?",
+                arguments: [starred ? 1 : 0, emailId]
+            )
+        }
+    }
+
+    func markDeleted(emailId: Int64) throws {
+        try dbPool.write { db in
+            try db.execute(
+                sql: "UPDATE emails SET is_deleted = 1 WHERE id = ?",
+                arguments: [emailId]
+            )
+        }
+    }
+
+    func moveEmail(emailId: Int64, toFolder: String) throws {
+        try dbPool.write { db in
+            try db.execute(
+                sql: "UPDATE emails SET folder = ? WHERE id = ?",
+                arguments: [toFolder, emailId]
+            )
+        }
+    }
+
+    // MARK: - Folders
+
+    func listFolders() throws -> [(folder: String, unreadCount: Int)] {
+        try dbPool.read { db in
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT folder, COUNT(*) FILTER (WHERE is_read = 0) as unread_count
+                FROM emails
+                WHERE is_deleted = 0
+                GROUP BY folder
+                ORDER BY folder
+            """)
+            return rows.map { (folder: $0["folder"], unreadCount: $0["unread_count"]) }
+        }
+    }
+
+    // MARK: - Sync State
+
+    func getSyncState(folder: String) throws -> SyncStateRecord? {
+        try dbPool.read { db in
+            try SyncStateRecord.fetchOne(db, key: folder)
+        }
+    }
+
+    func updateSyncState(_ record: SyncStateRecord) throws {
+        try dbPool.write { db in
+            try record.save(db)
+        }
+    }
+
+    // MARK: - Outbox
+
+    func queueOutgoing(_ message: OutboxRecord) throws -> Int64 {
+        try dbPool.write { db in
+            try message.insert(db)
+            return db.lastInsertedRowID
+        }
+    }
+
+    func fetchPendingOutbox() throws -> [OutboxRecord] {
+        try dbPool.read { db in
+            try OutboxRecord
+                .filter(Column("status") == "queued")
+                .fetchAll(db)
+        }
+    }
+
+    func updateOutboxStatus(id: Int64, status: String) throws {
+        try dbPool.write { db in
+            try db.execute(
+                sql: "UPDATE outbox SET status = ? WHERE id = ?",
+                arguments: [status, id]
+            )
+        }
+    }
+
+    // MARK: - Lookup
+
+    func findEmailId(byMessageId messageId: String) throws -> Int64? {
+        try dbPool.read { db in
+            let row = try Row.fetchOne(
+                db,
+                sql: "SELECT id FROM emails WHERE message_id = ?",
+                arguments: [messageId]
+            )
+            return row?["id"] as Int64?
+        }
+    }
+
+    /// Finds emails that don't have bodies stored yet, for background backfill.
+    func fetchEmailsWithoutBodies(limit: Int) throws -> [EmailRecord] {
+        try dbPool.read { db in
+            try EmailRecord.fetchAll(db, sql: """
+                SELECT e.* FROM emails e
+                LEFT JOIN email_bodies b ON e.id = b.email_id
+                WHERE b.email_id IS NULL AND e.is_deleted = 0
+                ORDER BY e.date DESC
+                LIMIT ?
+            """, arguments: [limit])
+        }
+    }
+
+    // MARK: - Stats
+
+    func emailCount() throws -> Int {
+        try dbPool.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM emails WHERE is_deleted = 0") ?? 0
+        }
+    }
+}
+
+// MARK: - GRDB Records
+
+struct EmailRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
+    static let databaseTableName = "emails"
+
+    var id: Int64?
+    var messageId: String
+    var threadId: String?
+    var folder: String
+    var senderName: String?
+    var senderEmail: String
+    var recipients: String?
+    var subject: String?
+    var date: Int
+    var isRead: Bool
+    var isStarred: Bool
+    var isDeleted: Bool
+    var hasAttachments: Bool
+    var uid: Int?
+    var flags: String?
+    var referencesHeader: String?
+    var inReplyTo: String?
+    var createdAt: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case id, folder, subject, date, uid, flags
+        case messageId = "message_id"
+        case threadId = "thread_id"
+        case senderName = "sender_name"
+        case senderEmail = "sender_email"
+        case recipients
+        case isRead = "is_read"
+        case isStarred = "is_starred"
+        case isDeleted = "is_deleted"
+        case hasAttachments = "has_attachments"
+        case referencesHeader = "references_header"
+        case inReplyTo = "in_reply_to"
+        case createdAt = "created_at"
+    }
+}
+
+struct SyncStateRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
+    static let databaseTableName = "sync_state"
+
+    var folder: String
+    var uidValidity: Int?
+    var lastUid: Int?
+    var lastSync: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case folder
+        case uidValidity = "uid_validity"
+        case lastUid = "last_uid"
+        case lastSync = "last_sync"
+    }
+}
+
+struct OutboxRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
+    static let databaseTableName = "outbox"
+
+    var id: Int64?
+    var toRecipients: String
+    var ccRecipients: String?
+    var bccRecipients: String?
+    var subject: String?
+    var bodyText: String?
+    var bodyHtml: String?
+    var inReplyTo: String?
+    var createdAt: Int?
+    var status: String
+
+    enum CodingKeys: String, CodingKey {
+        case id, subject, status
+        case toRecipients = "to_recipients"
+        case ccRecipients = "cc_recipients"
+        case bccRecipients = "bcc_recipients"
+        case bodyText = "body_text"
+        case bodyHtml = "body_html"
+        case inReplyTo = "in_reply_to"
+        case createdAt = "created_at"
+    }
+}
