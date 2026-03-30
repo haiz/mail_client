@@ -121,10 +121,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 redirectURI: redirectURI,
                 userEmail: userEmail
             )
-            loadMessages(folder: "INBOX")
-            updateStatusBar()
-            startPeriodicSync()
-            startBackfill()
+
+            // Seed demo data if the store is empty
+            Task {
+                let count = try await engine!.store.emailCount()
+                if count == 0 {
+                    try await Self.seedDemoData(store: engine!.store)
+                }
+                await MainActor.run {
+                    self.loadMessages(folder: "INBOX")
+                    self.updateStatusBar()
+                }
+            }
         } catch {
             showError("Failed to initialize: \(error.localizedDescription)")
         }
@@ -367,5 +375,62 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.informativeText = message
         alert.alertStyle = .warning
         alert.runModal()
+    }
+
+    // MARK: - Demo Data
+
+    private static func seedDemoData(store: MailStore) async throws {
+        let now = Int(Date().timeIntervalSince1970)
+        let emails: [(String, String, String, String, Int, Bool, Bool)] = [
+            // (sender, email, subject, body, minutesAgo, isRead, isStarred)
+            ("Alex Chen", "alex@company.com", "Re: API migration timeline",
+             "I've updated the RFC with the new endpoints. Can you review the breaking changes in section 3? The main concern is the auth token format change — existing clients will need to re-authenticate.\n\nKey changes:\n• /api/v2/users now returns paginated results by default\n• OAuth scopes are more granular (read:user vs read:user:email)\n• Rate limiting moved from 100/min to 60/min with burst support\n\nI think we should give partners 90 days notice minimum.",
+             5, false, false),
+            ("GitHub", "notifications@github.com", "[litemail] New issue: OAuth refresh token",
+             "A new issue has been opened by @user:\n\nThe refresh token flow fails silently when the access token expires during an active IMAP IDLE session. Expected behavior: automatic re-authentication.",
+             42, false, false),
+            ("Sarah Kim", "sarah@design.co", "Design review notes",
+             "Great progress on the mockups! A few thoughts:\n\n1. Sidebar spacing feels tight at 180px — try 200px\n2. The unread dot color should match the accent color\n3. Love the status bar idea with live RAM display\n4. Command palette animation could be snappier\n\nOverall direction is solid. Ship it.",
+             120, false, true),
+            ("Stripe", "receipts@stripe.com", "Your March invoice",
+             "Your invoice for March 2026 is ready.\n\nTotal: $49.00\nPlan: Pro\nPeriod: Mar 1 - Mar 31, 2026\n\nView your invoice at dashboard.stripe.com",
+             180, true, false),
+            ("David Park", "david@startup.io", "Re: Weekend plans",
+             "Sounds good! Let's do the hike on Saturday morning. I'll bring the coffee and trail mix. Meet at the trailhead at 8am?",
+             300, true, false),
+            ("Linear", "notifications@linear.app", "Weekly digest: 12 issues completed",
+             "Here's your team's weekly progress:\n\n✅ 12 completed\n🔄 3 in review\n⏳ 8 in progress\n📋 5 backlog\n\nTop contributor: You (7 issues)\nVelocity: +15% from last week",
+             420, true, false),
+            ("AWS", "no-reply@amazonaws.com", "Your bill for February 2026",
+             "Your AWS bill for the period of Feb 1 - Feb 28, 2026 is now available.\n\nTotal charges: $127.43\n\nTop services:\n• EC2: $45.20\n• RDS: $38.10\n• S3: $12.05\n• CloudFront: $8.92",
+             600, true, false),
+            ("Mom", "mom@family.com", "Call me when you're free 💕",
+             "Hi sweetie! Haven't heard from you in a while. Dad and I are doing well. The garden is blooming. Call us when you get a chance, no rush.\n\nLove, Mom",
+             900, false, false),
+            ("Hacker News", "hn@ycombinator.com", "Your post hit the front page",
+             "Congratulations! Your submission 'Show HN: LiteMail — a native macOS mail client in 20MB RAM' has reached the front page of Hacker News.\n\nCurrent stats:\n• 342 points\n• 127 comments\n• #3 position\n\nKeep building!",
+             1200, false, true),
+            ("Security Alert", "security@google.com", "New sign-in to your Google Account",
+             "A new sign-in was detected on your Google Account.\n\nDevice: MacBook Pro\nLocation: San Francisco, CA\nTime: March 29, 2026, 10:42 PM PST\n\nIf this was you, no further action is needed.",
+             1500, true, false),
+        ]
+
+        for (i, email) in emails.enumerated() {
+            let record = EmailRecord(
+                messageId: "<demo-\(i)@litemail.local>",
+                threadId: i <= 1 ? "thread-api-migration" : "thread-\(i)",
+                folder: "INBOX",
+                senderName: email.0,
+                senderEmail: email.1,
+                subject: email.2,
+                date: now - email.4 * 60,
+                isRead: email.5,
+                isStarred: email.6,
+                isDeleted: false,
+                hasAttachments: false
+            )
+            let id = try await store.insertEmail(record)
+            try await store.insertBody(emailId: id, text: email.3, html: nil)
+        }
     }
 }

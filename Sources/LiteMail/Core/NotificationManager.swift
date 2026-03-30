@@ -10,7 +10,13 @@ final class NotificationManager: NSObject, @unchecked Sendable {
         super.init()
     }
 
+    private var isAvailable: Bool {
+        // UNUserNotificationCenter requires a bundled app with Info.plist
+        Bundle.main.bundleIdentifier != nil
+    }
+
     func requestPermission() {
+        guard isAvailable else { return }
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
             if let error {
                 print("Notification permission error: \(error)")
@@ -19,6 +25,7 @@ final class NotificationManager: NSObject, @unchecked Sendable {
     }
 
     func notifyNewEmail(sender: String, subject: String) {
+        guard isAvailable else { return }
         let content = UNMutableNotificationContent()
         content.title = sender
         content.body = subject
@@ -27,13 +34,14 @@ final class NotificationManager: NSObject, @unchecked Sendable {
         let request = UNNotificationRequest(
             identifier: UUID().uuidString,
             content: content,
-            trigger: nil // Deliver immediately
+            trigger: nil
         )
 
         UNUserNotificationCenter.current().add(request)
     }
 
     func clearBadge() {
+        guard isAvailable else { return }
         UNUserNotificationCenter.current().removeAllDeliveredNotifications()
     }
 }

@@ -53,9 +53,13 @@ final class MainWindowController: NSObject {
         splitView.addArrangedSubview(messageListView.view)
         splitView.addArrangedSubview(detailView.view)
 
-        splitView.setHoldingPriority(.defaultLow + 1, forSubviewAt: 0)
-        splitView.setHoldingPriority(.defaultLow, forSubviewAt: 1)
-        splitView.setHoldingPriority(.defaultLow - 1, forSubviewAt: 2)
+        splitView.setHoldingPriority(.defaultHigh, forSubviewAt: 0)
+        splitView.setHoldingPriority(.defaultLow + 1, forSubviewAt: 1)
+        splitView.setHoldingPriority(.defaultLow, forSubviewAt: 2)
+
+        // Set initial widths
+        sidebarView.view.widthAnchor.constraint(greaterThanOrEqualToConstant: 180).isActive = true
+        messageListView.view.widthAnchor.constraint(greaterThanOrEqualToConstant: 280).isActive = true
 
         // Main container with split view + status bar
         let mainContainer = NSView()
@@ -95,6 +99,12 @@ final class MainWindowController: NSObject {
     func show() {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+
+        // Set initial divider positions after layout
+        DispatchQueue.main.async { [self] in
+            splitView.setPosition(200, ofDividerAt: 0)
+            splitView.setPosition(540, ofDividerAt: 1)
+        }
     }
 
     // MARK: - Keyboard Handling
