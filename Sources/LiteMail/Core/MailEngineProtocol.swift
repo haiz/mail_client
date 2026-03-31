@@ -1,81 +1,52 @@
 import Foundation
 
-/// Async interface for the mail engine. GUI (@MainActor) and future MCP server
-/// both call through this protocol. Enables clean separation of transport from
-/// presentation and makes the MCP bolt-on in Phase 4 a thin wrapper.
+/// High-level interface used by the GUI layer.
+/// AccountManager conforms to this. The GUI doesn't know about MailProvider,
+/// accounts, or protocols — it just calls these methods.
 protocol MailEngineProtocol: Sendable {
 
-    // MARK: - Authentication
+    // MARK: - Accounts
 
-    /// Initiates OAuth2 authentication flow. Returns true if authenticated.
-    func authenticate() async throws -> Bool
-
-    /// Whether the engine currently has valid credentials.
-    var isAuthenticated: Bool { get async }
+    func listAccounts() async throws -> [AccountConfig]
+    func addAccount(_ config: AccountConfig) async throws
+    func removeAccount(id: String) async throws
 
     // MARK: - Sync
 
-    /// Performs initial sync: all headers + bodies for latest N messages.
-    func performInitialSync(recentBodyCount: Int) async throws
+    func performInitialSync(accountId: String) async throws
+    func performIncrementalSync(accountId: String) async throws
+    func syncAllAccounts() async throws
 
-    /// Fetches new messages since last sync.
-    func performIncrementalSync() async throws
+    // MARK: - Search (cross-account)
 
-    /// Starts IMAP IDLE for real-time push notifications.
-    func startIdleWatch() async throws
-
-    /// Stops IMAP IDLE.
-    func stopIdleWatch() async throws
-
-    // MARK: - Search
-
-    /// Full-text search across indexed emails. Returns matching email IDs.
-    func search(query: String) async throws -> [EmailHeader]
+    func search(query: String, accountId: String?) async throws -> [EmailHeader]
 
     // MARK: - Read
 
-    /// Fetches email headers for a folder, paginated.
-    func fetchHeaders(folder: String, offset: Int, limit: Int) async throws -> [EmailHeader]
-
-    /// Fetches the full body for a specific email.
+    func fetchHeaders(accountId: String, folder: String, offset: Int, limit: Int) async throws -> [EmailHeader]
     func fetchBody(emailId: Int64) async throws -> EmailBody?
-
-    /// Fetches all messages in a thread, ordered chronologically.
     func fetchThread(threadId: String) async throws -> [EmailHeader]
-
-    /// Lists available folders/labels.
-    func listFolders() async throws -> [MailFolder]
+    func listFolders(accountId: String) async throws -> [MailFolder]
 
     // MARK: - Actions
 
-    /// Marks an email as read/unread.
     func markRead(emailId: Int64, read: Bool) async throws
-
-    /// Stars/unstars an email.
     func markStarred(emailId: Int64, starred: Bool) async throws
-
-    /// Archives an email (moves to All Mail).
     func archive(emailId: Int64) async throws
-
-    /// Deletes an email (moves to Trash).
     func delete(emailId: Int64) async throws
-
-    /// Moves an email to a different folder.
     func move(emailId: Int64, toFolder: String) async throws
 
     // MARK: - Compose
 
-    /// Sends an email. If offline, queues in outbox.
-    func send(message: OutgoingMessage) async throws
-
-    /// Saves a draft.
-    func saveDraft(_ draft: OutgoingMessage) async throws
+    func send(message: OutgoingMessage, fromAccountId: String) async throws
+    func saveDraft(_ draft: OutgoingMessage, accountId: String) async throws
 }
 
-// MARK: - Data Types
+// MARK: - Data Types (used by GUI)
 
 struct EmailHeader: Sendable, Identifiable {
     let id: Int64
+    let accountId: String
     let messageId: String
     let threadId: String?
     let folder: String

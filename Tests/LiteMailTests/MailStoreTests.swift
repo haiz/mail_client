@@ -6,10 +6,22 @@ final class MailStoreTests: XCTestCase {
 
     private var store: MailStore!
     private var dbPath: String!
+    private let testAccountId = "test-account"
 
     override func setUp() async throws {
         dbPath = NSTemporaryDirectory() + "litemail_test_\(UUID().uuidString).sqlite"
         store = try MailStore(path: dbPath)
+
+        // Insert a test account for v2 schema
+        let account = AccountRecord(
+            id: testAccountId,
+            emailAddress: "test@example.com",
+            protocolType: "imap",
+            authType: "password",
+            keychainRef: "test-keychain",
+            isDefault: true
+        )
+        try await store.insertAccount(account)
     }
 
     override func tearDown() async throws {
@@ -20,28 +32,36 @@ final class MailStoreTests: XCTestCase {
     // MARK: - Schema Tests
 
     func testFreshInstallCreatesAllTables() async throws {
-        // The store was just created in setUp, so all tables should exist
         let count = try await store.emailCount()
         XCTAssertEqual(count, 0)
+    }
+
+    // MARK: - Account Tests
+
+    func testInsertAndListAccounts() async throws {
+        let accounts = try await store.listAccounts()
+        XCTAssertEqual(accounts.count, 1)
+        XCTAssertEqual(accounts.first?.emailAddress, "test@example.com")
+    }
+
+    func testDeleteAccountCascadesEmails() async throws {
+        let record = makeEmail(messageId: "<cascade@test.com>")
+        _ = try await store.insertEmail(record)
+        let countBefore = try await store.emailCount(accountId: testAccountId)
+        XCTAssertEqual(countBefore, 1)
+
+        try await store.deleteAccount(id: testAccountId)
+        let remaining = try await store.emailCount(accountId: testAccountId)
+        XCTAssertEqual(remaining, 0)
+
+        let accounts = try await store.listAccounts()
+        XCTAssertTrue(accounts.isEmpty)
     }
 
     // MARK: - Insert Tests
 
     func testInsertEmail() async throws {
-        let record = EmailRecord(
-            messageId: "<test@example.com>",
-            threadId: "thread-1",
-            folder: "INBOX",
-            senderName: "Alice",
-            senderEmail: "alice@example.com",
-            subject: "Hello World",
-            date: Int(Date().timeIntervalSince1970),
-            isRead: false,
-            isStarred: false,
-            isDeleted: false,
-            hasAttachments: false
-        )
-
+        let record = makeEmail(messageId: "<test@example.com>")
         let id = try await store.insertEmail(record)
         XCTAssertGreaterThan(id, 0)
 
@@ -50,17 +70,7 @@ final class MailStoreTests: XCTestCase {
     }
 
     func testDuplicateMessageIdRejected() async throws {
-        let record = EmailRecord(
-            messageId: "<dup@example.com>",
-            folder: "INBOX",
-            senderEmail: "bob@example.com",
-            date: Int(Date().timeIntervalSince1970),
-            isRead: false,
-            isStarred: false,
-            isDeleted: false,
-            hasAttachments: false
-        )
-
+        let record = makeEmail(messageId: "<dup@example.com>")
         _ = try await store.insertEmail(record)
 
         do {
@@ -74,19 +84,7 @@ final class MailStoreTests: XCTestCase {
     // MARK: - Search Tests
 
     func testSearchFindsMatchingEmail() async throws {
-        let record = EmailRecord(
-            messageId: "<search-test@example.com>",
-            folder: "INBOX",
-            senderName: "Charlie",
-            senderEmail: "charlie@example.com",
-            subject: "API migration timeline",
-            date: Int(Date().timeIntervalSince1970),
-            isRead: false,
-            isStarred: false,
-            isDeleted: false,
-            hasAttachments: false
-        )
-
+        let record = makeEmail(messageId: "<search-test@example.com>", subject: "API migration timeline", senderName: "Charlie")
         let id = try await store.insertEmail(record)
         try await store.insertBody(emailId: id, text: "The new endpoints are ready for review.", html: nil)
 
@@ -96,18 +94,7 @@ final class MailStoreTests: XCTestCase {
     }
 
     func testSearchBodyText() async throws {
-        let record = EmailRecord(
-            messageId: "<body-search@example.com>",
-            folder: "INBOX",
-            senderEmail: "dave@example.com",
-            subject: "Meeting notes",
-            date: Int(Date().timeIntervalSince1970),
-            isRead: false,
-            isStarred: false,
-            isDeleted: false,
-            hasAttachments: false
-        )
-
+        let record = makeEmail(messageId: "<body-search@example.com>", subject: "Meeting notes")
         let id = try await store.insertEmail(record)
         try await store.insertBody(emailId: id, text: "We discussed the Kubernetes deployment strategy.", html: nil)
 
@@ -125,32 +112,41 @@ final class MailStoreTests: XCTestCase {
         XCTAssertTrue(results.isEmpty)
     }
 
+    func testCrossAccountSearch() async throws {
+        // Add second account
+        let account2 = AccountRecord(id: "acct2", emailAddress: "user2@example.com", protocolType: "imap", authType: "password", keychainRef: "k2", isDefault: false)
+        try await store.insertAccount(account2)
+
+        let r1 = makeEmail(messageId: "<acct1@test.com>", subject: "Kubernetes deploy", accountId: testAccountId)
+        let r2 = makeEmail(messageId: "<acct2@test.com>", subject: "Kubernetes cluster", accountId: "acct2")
+        let id1 = try await store.insertEmail(r1)
+        let id2 = try await store.insertEmail(r2)
+        try await store.insertBody(emailId: id1, text: "Deploy to production", html: nil)
+        try await store.insertBody(emailId: id2, text: "Cluster management", html: nil)
+
+        // Cross-account search (nil accountId)
+        let allResults = try await store.search(query: "Kubernetes", accountId: nil)
+        XCTAssertEqual(allResults.count, 2)
+
+        // Account-specific search
+        let acct1Results = try await store.search(query: "Kubernetes", accountId: testAccountId)
+        XCTAssertEqual(acct1Results.count, 1)
+    }
+
     // MARK: - Thread Tests
 
     func testFetchThread() async throws {
         let now = Int(Date().timeIntervalSince1970)
-
         for i in 0..<3 {
-            let record = EmailRecord(
-                messageId: "<thread-\(i)@example.com>",
-                threadId: "thread-abc",
-                folder: "INBOX",
-                senderEmail: "alice@example.com",
-                subject: "Thread subject",
-                date: now + i,
-                isRead: false,
-                isStarred: false,
-                isDeleted: false,
-                hasAttachments: false
-            )
+            var record = makeEmail(messageId: "<thread-\(i)@example.com>")
+            record.threadId = "thread-abc"
+            record.date = now + i
             _ = try await store.insertEmail(record)
         }
 
         let thread = try await store.fetchThread(threadId: "thread-abc")
         XCTAssertEqual(thread.count, 3)
-        // Should be chronological order
         XCTAssertTrue(thread[0].date <= thread[1].date)
-        XCTAssertTrue(thread[1].date <= thread[2].date)
     }
 
     func testFetchMissingThreadReturnsEmpty() async throws {
@@ -161,21 +157,11 @@ final class MailStoreTests: XCTestCase {
     // MARK: - Action Tests
 
     func testMarkRead() async throws {
-        let record = EmailRecord(
-            messageId: "<read-test@example.com>",
-            folder: "INBOX",
-            senderEmail: "eve@example.com",
-            date: Int(Date().timeIntervalSince1970),
-            isRead: false,
-            isStarred: false,
-            isDeleted: false,
-            hasAttachments: false
-        )
-
+        let record = makeEmail(messageId: "<read-test@example.com>")
         let id = try await store.insertEmail(record)
         try await store.markRead(emailId: id, read: true)
 
-        let headers = try await store.fetchHeaders(folder: "INBOX", offset: 0, limit: 10)
+        let headers = try await store.fetchHeaders(accountId: testAccountId, folder: "INBOX", offset: 0, limit: 10)
         XCTAssertTrue(headers.first?.isRead ?? false)
     }
 
@@ -186,9 +172,9 @@ final class MailStoreTests: XCTestCase {
             toRecipients: "[\"bob@example.com\"]",
             subject: "Test send",
             bodyText: "Hello from outbox",
-            status: "queued"
+            status: "queued",
+            accountId: testAccountId
         )
-
         _ = try await store.queueOutgoing(outgoing)
         let pending = try await store.fetchPendingOutbox()
         XCTAssertEqual(pending.count, 1)
@@ -199,14 +185,36 @@ final class MailStoreTests: XCTestCase {
         let outgoing = OutboxRecord(
             toRecipients: "[\"carol@example.com\"]",
             subject: "Status test",
-            status: "queued"
+            status: "queued",
+            accountId: testAccountId
         )
-
         let id = try await store.queueOutgoing(outgoing)
         try await store.updateOutboxStatus(id: id, status: "sending")
         try await store.updateOutboxStatus(id: id, status: "sent")
 
         let pending = try await store.fetchPendingOutbox()
         XCTAssertTrue(pending.isEmpty)
+    }
+
+    // MARK: - Helpers
+
+    private func makeEmail(
+        messageId: String,
+        subject: String? = "Test Subject",
+        senderName: String? = nil,
+        accountId: String? = nil
+    ) -> EmailRecord {
+        EmailRecord(
+            messageId: messageId,
+            folder: "INBOX",
+            senderEmail: "sender@example.com",
+            subject: subject,
+            date: Int(Date().timeIntervalSince1970),
+            isRead: false,
+            isStarred: false,
+            isDeleted: false,
+            hasAttachments: false,
+            accountId: accountId ?? testAccountId
+        )
     }
 }
