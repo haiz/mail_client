@@ -146,6 +146,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             do {
                 let body = try await accountManager.fetchBody(emailId: header.id)
                 windowController?.detailView.display(header: header, body: body)
+
+                // Wire detail view action buttons
+                windowController?.detailView.onReply = { [weak self] in
+                    self?.openComposer(mode: .reply(to: header, body: body))
+                }
+                windowController?.detailView.onForward = { [weak self] in
+                    self?.openComposer(mode: .forward(original: header, body: body))
+                }
+                windowController?.detailView.onArchive = { [weak self] in
+                    self?.handleAction(.archive(header.id))
+                }
+                windowController?.detailView.onDelete = { [weak self] in
+                    self?.handleAction(.delete(header.id))
+                }
+
                 if !header.isRead {
                     try await accountManager.markRead(emailId: header.id, read: true)
                 }
@@ -293,20 +308,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     // Step 2: Add account to DB + create provider
                     try await accountManager.addAccount(config)
 
-                    // Step 3: Try to connect — this is the real test
+                    // Step 3: Try to connect with 15-second timeout
                     guard let provider = await accountManager.getProvider(for: config.id) else {
                         throw AddAccountError.providerNotCreated
                     }
-                    try await provider.connect()
 
-                    // Step 4: Connection succeeded — run initial sync
-                    try? await provider.performInitialSync()
+                    try await withThrowingTaskGroup(of: Void.self) { group in
+                        group.addTask { try await provider.connect() }
+                        group.addTask {
+                            try await Task.sleep(for: .seconds(15))
+                            throw AddAccountError.connectionTimeout
+                        }
+                        // First to finish wins. If timeout fires first, connect is cancelled.
+                        try await group.next()
+                        group.cancelAll()
+                    }
+
+                    // Step 4: Connection succeeded — run initial sync (30s timeout, non-blocking on failure)
+                    Task {
+                        try? await withThrowingTaskGroup(of: Void.self) { group in
+                            group.addTask { try await provider.performInitialSync() }
+                            group.addTask {
+                                try await Task.sleep(for: .seconds(30))
+                                throw AddAccountError.syncTimeout
+                            }
+                            try await group.next()
+                            group.cancelAll()
+                        }
+                        await MainActor.run {
+                            self.loadSidebar()
+                            self.loadMessages()
+                            self.updateStatusBar()
+                        }
+                    }
 
                     await MainActor.run {
                         self.addAccountSheet = nil
                         self.loadSidebar()
                         self.loadMessages()
-                        completion(nil) // Success
+                        completion(nil) // Success — connected, sync running in background
                     }
                 } catch {
                     // Connection failed — remove the account we just added
@@ -325,7 +365,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private enum AddAccountError: Error, LocalizedError {
         case providerNotCreated
-        var errorDescription: String? { "Failed to create mail provider." }
+        case connectionTimeout
+        case syncTimeout
+        var errorDescription: String? {
+            switch self {
+            case .providerNotCreated: "Failed to create mail provider."
+            case .connectionTimeout: "Connection timed out after 15 seconds."
+            case .syncTimeout: "Sync timed out."
+            }
+        }
     }
 
     private static func friendlyError(_ error: Error) -> String {
