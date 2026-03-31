@@ -110,6 +110,18 @@ final class MainWindowController: NSObject {
     // MARK: - Keyboard Handling
 
     private func handleKeyDown(_ event: NSEvent) -> NSEvent? {
+        // Never intercept keys when a text field or text view has focus
+        // (e.g. search field, compose window, add account sheet)
+        if let responder = event.window?.firstResponder,
+           responder is NSTextView || responder is NSTextField {
+            // Exception: Cmd+K works everywhere
+            if event.modifierFlags.contains(.command) && event.charactersIgnoringModifiers == "k" {
+                toggleCommandPalette()
+                return nil
+            }
+            return event
+        }
+
         // Cmd+K → command palette
         if event.modifierFlags.contains(.command) && event.charactersIgnoringModifiers == "k" {
             toggleCommandPalette()
@@ -121,8 +133,9 @@ final class MainWindowController: NSObject {
             return event
         }
 
-        // Vim-style navigation when message list is focused
-        guard window.firstResponder === messageListView.tableView else {
+        // Only handle vim keys when our main window's table view is focused
+        guard event.window === window,
+              window.firstResponder === messageListView.tableView else {
             return event
         }
 
