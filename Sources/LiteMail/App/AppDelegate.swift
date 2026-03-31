@@ -5,6 +5,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var accountManager: AccountManager?
     private var currentAccountId: String?
     private var currentFolder = "INBOX"
+    private var settingsWindow: SettingsWindow?
+    private var addAccountSheet: AddAccountSheet?
+    private var composerWindow: ComposerWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let wc = MainWindowController()
@@ -225,10 +228,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let composer = ComposerWindow(mode: mode)
         composer.onSend = { [weak self] message in
             guard let self, let accountId = self.currentAccountId else { return }
+            self.composerWindow = nil  // Release after send
             Task {
                 try? await self.accountManager?.send(message: message, fromAccountId: accountId)
             }
         }
+        self.composerWindow = composer  // Retain reference
         composer.show()
     }
 
@@ -261,27 +266,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             settings.onSyncNow = { [weak self] in
                 self?.syncNow()
             }
+            self.settingsWindow = settings  // Retain reference
             settings.show()
         }
     }
 
     private func showAddAccount() {
         guard let window = windowController?.window else { return }
-        let addSheet = AddAccountSheet()
-        addSheet.onAddAccount = { [weak self] config, password in
+        let sheet = AddAccountSheet()
+        sheet.onAddAccount = { [weak self] config, password in
             guard let self else { return }
             Task {
-                // Store credentials
                 if let password {
                     self.accountManager?.authManager.storePassword(accountId: config.id, password: password)
                 }
                 try? await self.accountManager?.addAccount(config)
                 await MainActor.run {
+                    self.addAccountSheet = nil  // Release after use
                     self.loadSidebar()
                 }
             }
         }
-        addSheet.show(relativeTo: window)
+        self.addAccountSheet = sheet  // Retain reference
+        sheet.show(relativeTo: window)
     }
 
     private func loadSidebar() {
