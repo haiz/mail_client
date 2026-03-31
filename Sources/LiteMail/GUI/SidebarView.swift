@@ -84,11 +84,8 @@ final class SidebarView: NSObject {
             accountPicker.lastItem?.representedObject = account.id
         }
 
-        if accountList.count <= 1 {
-            accountPicker.isHidden = true
-        } else {
-            accountPicker.isHidden = false
-        }
+        // Always show — even with 1 account, user needs to see which account is active
+        accountPicker.isHidden = false
 
         if let activeId, let index = accountList.firstIndex(where: { $0.id == activeId }) {
             accountPicker.selectItem(at: index)
