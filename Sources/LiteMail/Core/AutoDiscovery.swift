@@ -240,13 +240,13 @@ struct AutoDiscovery {
     // MARK: - Generic IMAP Guess
 
     /// For unknown domains, guess common IMAP/SMTP patterns.
-    /// hai@caodev.top → server: mail.caodev.top, username: hai, IMAP 993, SMTP 587
+    /// hai@caodev.top → server: mail.caodev.top, IMAP 993, SMTP 587
+    /// Username defaults to full email (most servers expect this).
+    /// User can change to local-part in the form if needed.
     private static func guessIMAPConfig(email: String, domain: String) -> Result {
-        let username = email.split(separator: "@").first.map(String.init)
-
         return Result(
             protocolType: .imap,
-            imapUsername: username,
+            imapUsername: nil,  // nil = use full email address (most common)
             imapHost: "mail.\(domain)", imapPort: 993,
             smtpHost: "mail.\(domain)", smtpPort: 587,
             jmapUrl: nil,

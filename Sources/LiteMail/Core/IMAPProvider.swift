@@ -45,7 +45,13 @@ actor IMAPProvider: MailProvider {
             try await server.authenticateXOAUTH2(email: emailAddress, accessToken: token)
         case .password:
             let password = authManager.getPassword(accountId: accountId) ?? ""
-            try await server.login(username: loginUsername, password: password)
+            // Try AUTHENTICATE PLAIN first (required by Stalwart, Dovecot, etc.)
+            // Fall back to LOGIN if PLAIN is not supported
+            do {
+                try await server.authenticatePlain(username: loginUsername, password: password)
+            } catch {
+                try await server.login(username: loginUsername, password: password)
+            }
         case .bearer:
             break // JMAP-only, not used for IMAP
         }
