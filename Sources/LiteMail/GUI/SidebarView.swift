@@ -8,7 +8,8 @@ final class SidebarView: NSObject {
     private let scrollView: NSScrollView
     private let outlineView: NSOutlineView
 
-    var onFolderSelected: ((String) -> Void)?
+    /// (accountId, folderId)
+    var onFolderSelected: ((String, String) -> Void)?
 
     private var mailboxes: [SidebarItem] = []
 
@@ -41,6 +42,24 @@ final class SidebarView: NSObject {
 
         // Default mailboxes
         loadDefaultMailboxes()
+    }
+
+    /// Updates sidebar with multiple accounts, each showing its folders.
+    func updateAccounts(_ accounts: [(accountId: String, email: String, folders: [MailFolder])]) {
+        mailboxes = accounts.map { account in
+            let children = account.folders.map { folder in
+                let icon = Self.iconForFolder(folder.id)
+                return SidebarItem(title: folder.name, icon: icon, folderId: folder.id, unreadCount: folder.unreadCount, accountId: account.accountId)
+            }
+            return SidebarItem(title: account.email, icon: "person.circle.fill", folderId: nil, children: children, accountId: account.accountId)
+        }
+        outlineView.reloadData()
+        outlineView.expandItem(nil, expandChildren: true)
+
+        // Select first account's Inbox
+        if let inboxRow = findRow(folderId: "INBOX") {
+            outlineView.selectRowIndexes(IndexSet(integer: inboxRow), byExtendingSelection: false)
+        }
     }
 
     func update(folders: [MailFolder]) {
@@ -204,7 +223,19 @@ extension SidebarView: NSOutlineViewDelegate {
         let row = outlineView.selectedRow
         guard row >= 0, let item = outlineView.item(atRow: row) as? SidebarItem,
               let folderId = item.folderId else { return }
-        onFolderSelected?(folderId)
+        // Walk up to find accountId from parent if not on this item
+        let accountId = item.accountId ?? findAccountId(for: row)
+        onFolderSelected?(accountId ?? "default", folderId)
+    }
+
+    private func findAccountId(for row: Int) -> String? {
+        let item = outlineView.item(atRow: row) as? SidebarItem
+        if let accountId = item?.accountId { return accountId }
+        // Check parent
+        if let parent = outlineView.parent(forItem: item) as? SidebarItem {
+            return parent.accountId
+        }
+        return nil
     }
 }
 
@@ -216,12 +247,14 @@ private class SidebarItem {
     let folderId: String?
     var unreadCount: Int?
     var children: [SidebarItem]?
+    var accountId: String?
 
-    init(title: String, icon: String? = nil, folderId: String? = nil, unreadCount: Int? = nil, children: [SidebarItem]? = nil) {
+    init(title: String, icon: String? = nil, folderId: String? = nil, unreadCount: Int? = nil, children: [SidebarItem]? = nil, accountId: String? = nil) {
         self.title = title
         self.icon = icon
         self.folderId = folderId
         self.unreadCount = unreadCount
         self.children = children
+        self.accountId = accountId
     }
 }

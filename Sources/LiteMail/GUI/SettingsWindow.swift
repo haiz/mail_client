@@ -1,16 +1,24 @@
 import AppKit
 
-/// Settings/preferences window for account management and sync configuration.
+/// Settings/preferences window with multi-account management.
 final class SettingsWindow: NSObject {
 
     private let window: NSWindow
+    private let accountTableView: NSTableView
 
-    var onSignOut: (() -> Void)?
+    var onAddAccount: (() -> Void)?
+    var onRemoveAccount: ((String) -> Void)?
     var onSyncNow: (() -> Void)?
 
-    init(userEmail: String, emailCount: Int, lastSync: Date?) {
+    private var accounts: [AccountConfig] = []
+    private var emailCount: Int = 0
+
+    init(accounts: [AccountConfig], emailCount: Int) {
+        self.accounts = accounts
+        self.emailCount = emailCount
+
         window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 320),
+            contentRect: NSRect(x: 0, y: 0, width: 460, height: 400),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -18,52 +26,71 @@ final class SettingsWindow: NSObject {
         window.title = "Settings"
         window.center()
 
+        accountTableView = NSTableView()
+        accountTableView.headerView = nil
+        accountTableView.rowHeight = 36
+
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("AccountCol"))
+        column.isEditable = false
+        accountTableView.addTableColumn(column)
+
         super.init()
 
+        accountTableView.dataSource = self
+        accountTableView.delegate = self
+
+        setupLayout()
+    }
+
+    func show() {
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    private func setupLayout() {
         let container = NSView()
 
-        // Account section
-        let accountHeader = Self.sectionHeader("Account")
-        let emailLabel = NSTextField(labelWithString: userEmail)
-        emailLabel.font = .systemFont(ofSize: 13)
+        // Accounts section
+        let accountHeader = Self.sectionHeader("Accounts")
 
-        let signOutButton = NSButton(title: "Sign Out", target: self, action: #selector(signOutClicked))
-        signOutButton.bezelStyle = .rounded
+        let scrollView = NSScrollView()
+        scrollView.documentView = accountTableView
+        scrollView.hasVerticalScroller = true
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.heightAnchor.constraint(equalToConstant: 140).isActive = true
 
-        // Sync section
-        let syncHeader = Self.sectionHeader("Sync")
+        let addButton = NSButton(title: "Add Account...", target: self, action: #selector(addClicked))
+        addButton.bezelStyle = .rounded
 
-        let countLabel = NSTextField(labelWithString: "Emails stored: \(emailCount)")
+        let removeButton = NSButton(title: "Remove", target: self, action: #selector(removeClicked))
+        removeButton.bezelStyle = .rounded
+
+        let accountButtons = NSStackView(views: [addButton, removeButton])
+        accountButtons.spacing = 8
+
+        // Stats section
+        let statsHeader = Self.sectionHeader("Stats")
+        let countLabel = NSTextField(labelWithString: "Total emails: \(emailCount)")
         countLabel.font = .systemFont(ofSize: 13)
 
-        let lastSyncLabel = NSTextField(labelWithString: "Last sync: \(Self.formatDate(lastSync))")
-        lastSyncLabel.font = .systemFont(ofSize: 13)
-        lastSyncLabel.textColor = .secondaryLabelColor
-
-        let syncButton = NSButton(title: "Sync Now", target: self, action: #selector(syncNowClicked))
+        let syncButton = NSButton(title: "Sync All", target: self, action: #selector(syncClicked))
         syncButton.bezelStyle = .rounded
 
-        // About section
+        // About
         let aboutHeader = Self.sectionHeader("About")
-        let versionLabel = NSTextField(labelWithString: "LiteMail v0.1.0")
-        versionLabel.font = .systemFont(ofSize: 13)
-        versionLabel.textColor = .secondaryLabelColor
+        let versionLabel = NSTextField(labelWithString: "LiteMail v0.2.0 — Multi-account IMAP/JMAP")
+        versionLabel.font = .systemFont(ofSize: 11)
+        versionLabel.textColor = .tertiaryLabelColor
 
-        let descLabel = NSTextField(labelWithString: "Lightweight native macOS mail client")
-        descLabel.font = .systemFont(ofSize: 11)
-        descLabel.textColor = .tertiaryLabelColor
-
-        // Layout
         let stack = NSStackView(views: [
-            accountHeader, emailLabel, signOutButton,
+            accountHeader, scrollView, accountButtons,
             Self.spacer(),
-            syncHeader, countLabel, lastSyncLabel, syncButton,
+            statsHeader, countLabel, syncButton,
             Self.spacer(),
-            aboutHeader, versionLabel, descLabel,
+            aboutHeader, versionLabel,
         ])
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 6
+        stack.spacing = 8
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         container.addSubview(stack)
@@ -71,34 +98,38 @@ final class SettingsWindow: NSObject {
             stack.topAnchor.constraint(equalTo: container.topAnchor, constant: 16),
             stack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
             stack.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -20),
+            scrollView.widthAnchor.constraint(equalToConstant: 400),
         ])
 
         window.contentView = container
     }
 
-    func show() {
-        window.makeKeyAndOrderFront(nil)
+    @objc private func addClicked() {
+        onAddAccount?()
     }
 
-    @objc private func signOutClicked() {
+    @objc private func removeClicked() {
+        let row = accountTableView.selectedRow
+        guard row >= 0, row < accounts.count else { return }
+        let account = accounts[row]
+
         let alert = NSAlert()
-        alert.messageText = "Sign Out"
-        alert.informativeText = "This will remove your account credentials. You'll need to sign in again."
-        alert.addButton(withTitle: "Sign Out")
+        alert.messageText = "Remove Account"
+        alert.informativeText = "Remove \(account.emailAddress)? All local emails for this account will be deleted."
+        alert.addButton(withTitle: "Remove")
         alert.addButton(withTitle: "Cancel")
         alert.alertStyle = .warning
 
         if alert.runModal() == .alertFirstButtonReturn {
-            onSignOut?()
-            window.close()
+            onRemoveAccount?(account.id)
+            accounts.remove(at: row)
+            accountTableView.reloadData()
         }
     }
 
-    @objc private func syncNowClicked() {
+    @objc private func syncClicked() {
         onSyncNow?()
     }
-
-    // MARK: - Helpers
 
     private static func sectionHeader(_ title: String) -> NSTextField {
         let label = NSTextField(labelWithString: title)
@@ -113,13 +144,56 @@ final class SettingsWindow: NSObject {
         v.heightAnchor.constraint(equalToConstant: 8).isActive = true
         return v
     }
+}
 
-    private static func formatDate(_ date: Date?) -> String {
-        guard let date else { return "Never" }
-        let f = DateFormatter()
-        f.doesRelativeDateFormatting = true
-        f.dateStyle = .short
-        f.timeStyle = .short
-        return f.string(from: date)
+// MARK: - NSTableViewDataSource
+
+extension SettingsWindow: NSTableViewDataSource {
+    func numberOfRows(in tableView: NSTableView) -> Int { accounts.count }
+}
+
+// MARK: - NSTableViewDelegate
+
+extension SettingsWindow: NSTableViewDelegate {
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        guard row < accounts.count else { return nil }
+        let account = accounts[row]
+
+        let cellId = NSUserInterfaceItemIdentifier("AccountCell")
+        let cell: NSTableCellView
+
+        if let recycled = tableView.makeView(withIdentifier: cellId, owner: self) as? NSTableCellView {
+            cell = recycled
+        } else {
+            cell = NSTableCellView()
+            cell.identifier = cellId
+
+            let textField = NSTextField(labelWithString: "")
+            textField.translatesAutoresizingMaskIntoConstraints = false
+            cell.addSubview(textField)
+            cell.textField = textField
+
+            let badge = NSTextField(labelWithString: "")
+            badge.translatesAutoresizingMaskIntoConstraints = false
+            badge.identifier = NSUserInterfaceItemIdentifier("protocol")
+            badge.font = .monospacedSystemFont(ofSize: 9, weight: .medium)
+            badge.textColor = .secondaryLabelColor
+            cell.addSubview(badge)
+
+            NSLayoutConstraint.activate([
+                textField.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 8),
+                textField.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+                badge.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -8),
+                badge.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+            ])
+        }
+
+        cell.textField?.stringValue = account.emailAddress
+        cell.textField?.font = account.isDefault ? .systemFont(ofSize: 13, weight: .medium) : .systemFont(ofSize: 13)
+
+        let badge = cell.subviews.first { $0.identifier?.rawValue == "protocol" } as? NSTextField
+        badge?.stringValue = account.protocolType.rawValue.uppercased()
+
+        return cell
     }
 }

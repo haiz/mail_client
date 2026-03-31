@@ -10,7 +10,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let wc = MainWindowController()
         windowController = wc
 
-        wc.onFolderSelected = { [weak self] folder in
+        wc.onFolderSelected = { [weak self] accountId, folder in
+            self?.currentAccountId = accountId
             self?.currentFolder = folder
             self?.loadMessages()
         }
@@ -106,6 +107,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
 
                 await MainActor.run {
+                    self.loadSidebar()
                     self.loadMessages()
                     self.updateStatusBar()
                 }
@@ -243,13 +245,70 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openSettings() {
         Task { @MainActor in
-            let count = (try? await accountManager?.store.emailCount()) ?? 0
-            let settings = SettingsWindow(userEmail: currentAccountId ?? "—", emailCount: count, lastSync: Date())
+            guard let accountManager else { return }
+            let accounts = try await accountManager.listAccounts()
+            let count = (try? await accountManager.store.emailCount()) ?? 0
+            let settings = SettingsWindow(accounts: accounts, emailCount: count)
+            settings.onAddAccount = { [weak self] in
+                self?.showAddAccount()
+            }
+            settings.onRemoveAccount = { [weak self] accountId in
+                Task {
+                    try? await self?.accountManager?.removeAccount(id: accountId)
+                    await MainActor.run { self?.loadSidebar() }
+                }
+            }
             settings.onSyncNow = { [weak self] in
                 self?.syncNow()
             }
             settings.show()
         }
+    }
+
+    private func showAddAccount() {
+        guard let window = windowController?.window else { return }
+        let addSheet = AddAccountSheet()
+        addSheet.onAddAccount = { [weak self] config, password in
+            guard let self else { return }
+            Task {
+                // Store credentials
+                if let password {
+                    self.accountManager?.authManager.storePassword(accountId: config.id, password: password)
+                }
+                try? await self.accountManager?.addAccount(config)
+                await MainActor.run {
+                    self.loadSidebar()
+                }
+            }
+        }
+        addSheet.show(relativeTo: window)
+    }
+
+    private func loadSidebar() {
+        guard let accountManager else { return }
+        Task { @MainActor in
+            let accounts = try await accountManager.listAccounts()
+            var sidebarData: [(accountId: String, email: String, folders: [MailFolder])] = []
+
+            for account in accounts {
+                let folders = try await accountManager.listFolders(accountId: account.id)
+                // If no folders from DB yet, show defaults
+                let displayFolders = folders.isEmpty ? Self.defaultFolders() : folders
+                sidebarData.append((accountId: account.id, email: account.emailAddress, folders: displayFolders))
+            }
+
+            windowController?.sidebarView.updateAccounts(sidebarData)
+        }
+    }
+
+    private static func defaultFolders() -> [MailFolder] {
+        [
+            MailFolder(id: "INBOX", name: "Inbox", unreadCount: 0),
+            MailFolder(id: "[Gmail]/Starred", name: "Starred", unreadCount: 0),
+            MailFolder(id: "[Gmail]/Sent Mail", name: "Sent", unreadCount: 0),
+            MailFolder(id: "[Gmail]/Drafts", name: "Drafts", unreadCount: 0),
+            MailFolder(id: "[Gmail]/Trash", name: "Trash", unreadCount: 0),
+        ]
     }
 
     // MARK: - Status Bar

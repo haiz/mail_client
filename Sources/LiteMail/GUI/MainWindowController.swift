@@ -12,8 +12,8 @@ final class MainWindowController: NSObject {
     let statusBar: StatusBar
     private var commandPalette: CommandPalette?
 
-    /// Callback when a folder is selected in the sidebar.
-    var onFolderSelected: ((String) -> Void)?
+    /// Callback when a folder is selected in the sidebar. (accountId, folderId)
+    var onFolderSelected: ((String, String) -> Void)?
     /// Callback when a message is selected in the list.
     var onMessageSelected: ((EmailHeader) -> Void)?
     /// Callback for actions from command palette or keyboard.
@@ -83,8 +83,8 @@ final class MainWindowController: NSObject {
         splitView.delegate = self
 
         // Wire callbacks
-        sidebarView.onFolderSelected = { [weak self] folder in
-            self?.onFolderSelected?(folder)
+        sidebarView.onFolderSelected = { [weak self] accountId, folder in
+            self?.onFolderSelected?(accountId, folder)
         }
         messageListView.onMessageSelected = { [weak self] header in
             self?.onMessageSelected?(header)
