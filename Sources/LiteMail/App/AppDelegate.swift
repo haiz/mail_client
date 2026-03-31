@@ -343,10 +343,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
 
                     await MainActor.run {
-                        self.addAccountSheet = nil
+                        completion(nil) // Must call before releasing sheet
                         self.loadSidebar()
                         self.loadMessages()
-                        completion(nil) // Success — connected, sync running in background
+                        self.addAccountSheet = nil // Release after sheet dismisses
                     }
                 } catch {
                     // Connection failed — remove the account we just added
