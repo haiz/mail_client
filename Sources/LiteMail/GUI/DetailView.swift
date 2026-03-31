@@ -1,35 +1,80 @@
 import AppKit
 
-/// Email detail view. Renders email body as NSAttributedString (no WebKit).
-/// Shows sender, subject, date, and body content.
+/// Email detail view. Superhuman minimalism + Mimestream native feel.
+/// Renders email body as NSAttributedString (no WebKit, <30MB RAM).
 final class DetailView: NSObject {
 
     let view: NSView
-    private let scrollView: NSScrollView
-    private let contentView: NSView
 
-    // Header elements
+    // Header
     private let subjectLabel = NSTextField(labelWithString: "")
+    private let avatarCircle: NSView
+    private let avatarLabel = NSTextField(labelWithString: "")
     private let senderLabel = NSTextField(labelWithString: "")
     private let dateLabel = NSTextField(labelWithString: "")
-    private let avatarView = NSTextField(labelWithString: "")
+    private let recipientLabel = NSTextField(labelWithString: "")
+
+    // Action bar
+    private let replyButton: NSButton
+    private let forwardButton: NSButton
+    private let archiveButton: NSButton
+    private let deleteButton: NSButton
+    private let actionBar: NSStackView
+
+    // Separator
+    private let headerSeparator = NSBox()
 
     // Body
     private let bodyTextView: NSTextView
     private let bodyScrollView: NSScrollView
 
     // Empty state
-    private let emptyLabel = NSTextField(labelWithString: "Select a message")
+    private let emptyContainer = NSView()
+    private let emptyIcon = NSImageView()
+    private let emptyTitle = NSTextField(labelWithString: "No message selected")
+    private let emptySubtitle = NSTextField(labelWithString: "Select an email to read it here\n\u{2318}K to search \u{2022} j/k to navigate")
 
-    private static let dateFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateStyle = .medium
-        f.timeStyle = .short
-        return f
-    }()
+    // Callbacks
+    var onReply: (() -> Void)?
+    var onForward: (() -> Void)?
+    var onArchive: (() -> Void)?
+    var onDelete: (() -> Void)?
+
+    // Colors for avatar (deterministic by sender)
+    private static let avatarColors: [NSColor] = [
+        NSColor(red: 0.35, green: 0.56, blue: 0.97, alpha: 1), // Blue
+        NSColor(red: 0.94, green: 0.42, blue: 0.42, alpha: 1), // Red
+        NSColor(red: 0.26, green: 0.76, blue: 0.53, alpha: 1), // Green
+        NSColor(red: 0.96, green: 0.65, blue: 0.14, alpha: 1), // Orange
+        NSColor(red: 0.67, green: 0.44, blue: 0.86, alpha: 1), // Purple
+        NSColor(red: 0.87, green: 0.36, blue: 0.58, alpha: 1), // Pink
+        NSColor(red: 0.27, green: 0.71, blue: 0.73, alpha: 1), // Teal
+    ]
 
     override init() {
-        // Body text view
+        // Avatar circle (real layer-backed circle)
+        avatarCircle = NSView()
+        avatarCircle.wantsLayer = true
+        avatarCircle.layer?.cornerRadius = 20
+
+        // Action buttons with SF Symbols
+        replyButton = NSButton(image: NSImage(systemSymbolName: "arrowshape.turn.up.left.fill", accessibilityDescription: "Reply")!, target: nil, action: nil)
+        forwardButton = NSButton(image: NSImage(systemSymbolName: "arrowshape.turn.up.right.fill", accessibilityDescription: "Forward")!, target: nil, action: nil)
+        archiveButton = NSButton(image: NSImage(systemSymbolName: "archivebox.fill", accessibilityDescription: "Archive")!, target: nil, action: nil)
+        deleteButton = NSButton(image: NSImage(systemSymbolName: "trash.fill", accessibilityDescription: "Delete")!, target: nil, action: nil)
+
+        for btn in [replyButton, forwardButton, archiveButton, deleteButton] {
+            btn.bezelStyle = .accessoryBarAction
+            btn.isBordered = false
+            btn.contentTintColor = .secondaryLabelColor
+            btn.widthAnchor.constraint(equalToConstant: 28).isActive = true
+            btn.heightAnchor.constraint(equalToConstant: 28).isActive = true
+        }
+
+        actionBar = NSStackView(views: [replyButton, forwardButton, archiveButton, deleteButton])
+        actionBar.spacing = 4
+
+        // Body
         bodyTextView = NSTextView()
         bodyTextView.isEditable = false
         bodyTextView.isSelectable = true
@@ -38,142 +83,217 @@ final class DetailView: NSObject {
         bodyTextView.textContainer?.widthTracksTextView = true
         bodyTextView.isAutomaticLinkDetectionEnabled = true
         bodyTextView.drawsBackground = false
+        bodyTextView.linkTextAttributes = [
+            .foregroundColor: NSColor.controlAccentColor,
+            .underlineStyle: NSUnderlineStyle.single.rawValue,
+        ]
 
         bodyScrollView = NSScrollView()
         bodyScrollView.documentView = bodyTextView
         bodyScrollView.hasVerticalScroller = true
         bodyScrollView.autohidesScrollers = true
         bodyScrollView.drawsBackground = false
-        bodyScrollView.translatesAutoresizingMaskIntoConstraints = false
-
-        // Container
-        contentView = NSView()
-        contentView.translatesAutoresizingMaskIntoConstraints = false
-
-        scrollView = NSScrollView()
-        scrollView.documentView = contentView
-        scrollView.hasVerticalScroller = true
-        scrollView.autohidesScrollers = true
-        scrollView.drawsBackground = false
 
         view = NSView()
 
         super.init()
 
+        replyButton.target = self; replyButton.action = #selector(replyClicked)
+        forwardButton.target = self; forwardButton.action = #selector(forwardClicked)
+        archiveButton.target = self; archiveButton.action = #selector(archiveClicked)
+        deleteButton.target = self; deleteButton.action = #selector(deleteClicked)
+
         setupLayout()
         showEmpty()
     }
 
+    // MARK: - Layout
+
     private func setupLayout() {
-        for v in [subjectLabel, senderLabel, dateLabel, avatarView, bodyScrollView, emptyLabel] {
+        let allViews: [NSView] = [
+            subjectLabel, avatarCircle, avatarLabel, senderLabel, dateLabel,
+            recipientLabel, actionBar, headerSeparator, bodyScrollView, emptyContainer,
+        ]
+        for v in allViews {
             v.translatesAutoresizingMaskIntoConstraints = false
             view.addSubview(v)
         }
 
-        // Subject
-        subjectLabel.font = .systemFont(ofSize: 20, weight: .semibold)
+        // Subject: 22pt bold
+        subjectLabel.font = .systemFont(ofSize: 22, weight: .bold)
         subjectLabel.lineBreakMode = .byWordWrapping
-        subjectLabel.maximumNumberOfLines = 3
-        subjectLabel.preferredMaxLayoutWidth = 500
+        subjectLabel.maximumNumberOfLines = 2
+        subjectLabel.textColor = .labelColor
 
-        // Avatar circle
-        avatarView.font = .systemFont(ofSize: 14, weight: .semibold)
-        avatarView.alignment = .center
-        avatarView.textColor = .controlAccentColor
-        avatarView.backgroundColor = .controlAccentColor.withAlphaComponent(0.1)
-        avatarView.isBordered = false
-        avatarView.isEditable = false
-        avatarView.wantsLayer = true
-        avatarView.layer?.cornerRadius = 16
+        // Avatar
+        avatarLabel.font = .systemFont(ofSize: 15, weight: .semibold)
+        avatarLabel.alignment = .center
+        avatarLabel.textColor = .white
+        avatarLabel.backgroundColor = .clear
+        avatarLabel.isBordered = false
+        avatarLabel.isEditable = false
+        avatarLabel.drawsBackground = false
 
-        // Sender
-        senderLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        // Sender: bold, inline with date
+        senderLabel.font = .systemFont(ofSize: 14, weight: .semibold)
+        senderLabel.textColor = .labelColor
+        senderLabel.lineBreakMode = .byTruncatingTail
 
-        // Date
-        dateLabel.font = .systemFont(ofSize: 11)
+        // Date: secondary, relative
+        dateLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
         dateLabel.textColor = .tertiaryLabelColor
 
+        // Recipients
+        recipientLabel.font = .systemFont(ofSize: 12)
+        recipientLabel.textColor = .secondaryLabelColor
+        recipientLabel.lineBreakMode = .byTruncatingTail
+
+        // Separator
+        headerSeparator.boxType = .separator
+
         // Empty state
-        emptyLabel.font = .systemFont(ofSize: 16)
-        emptyLabel.textColor = .tertiaryLabelColor
-        emptyLabel.alignment = .center
+        emptyIcon.image = NSImage(systemSymbolName: "envelope.open", accessibilityDescription: nil)
+        emptyIcon.contentTintColor = .tertiaryLabelColor
+        emptyIcon.symbolConfiguration = .init(pointSize: 40, weight: .ultraLight)
+        emptyIcon.translatesAutoresizingMaskIntoConstraints = false
+
+        emptyTitle.font = .systemFont(ofSize: 18, weight: .medium)
+        emptyTitle.textColor = .secondaryLabelColor
+        emptyTitle.alignment = .center
+        emptyTitle.translatesAutoresizingMaskIntoConstraints = false
+
+        emptySubtitle.font = .systemFont(ofSize: 12)
+        emptySubtitle.textColor = .tertiaryLabelColor
+        emptySubtitle.alignment = .center
+        emptySubtitle.maximumNumberOfLines = 3
+        emptySubtitle.translatesAutoresizingMaskIntoConstraints = false
+
+        emptyContainer.addSubview(emptyIcon)
+        emptyContainer.addSubview(emptyTitle)
+        emptyContainer.addSubview(emptySubtitle)
 
         NSLayoutConstraint.activate([
-            subjectLabel.topAnchor.constraint(equalTo: view.topAnchor, constant: 20),
-            subjectLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
-            subjectLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24),
+            emptyIcon.centerXAnchor.constraint(equalTo: emptyContainer.centerXAnchor),
+            emptyIcon.centerYAnchor.constraint(equalTo: emptyContainer.centerYAnchor, constant: -40),
+            emptyIcon.widthAnchor.constraint(equalToConstant: 48),
+            emptyIcon.heightAnchor.constraint(equalToConstant: 48),
+            emptyTitle.topAnchor.constraint(equalTo: emptyIcon.bottomAnchor, constant: 12),
+            emptyTitle.centerXAnchor.constraint(equalTo: emptyContainer.centerXAnchor),
+            emptySubtitle.topAnchor.constraint(equalTo: emptyTitle.bottomAnchor, constant: 6),
+            emptySubtitle.centerXAnchor.constraint(equalTo: emptyContainer.centerXAnchor),
+            emptySubtitle.widthAnchor.constraint(lessThanOrEqualToConstant: 250),
+        ])
 
-            avatarView.topAnchor.constraint(equalTo: subjectLabel.bottomAnchor, constant: 12),
-            avatarView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
-            avatarView.widthAnchor.constraint(equalToConstant: 32),
-            avatarView.heightAnchor.constraint(equalToConstant: 32),
+        // Main layout
+        NSLayoutConstraint.activate([
+            // Subject
+            subjectLabel.topAnchor.constraint(equalTo: view.topAnchor, constant: 24),
+            subjectLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 28),
+            subjectLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -28),
 
-            senderLabel.centerYAnchor.constraint(equalTo: avatarView.centerYAnchor, constant: -8),
-            senderLabel.leadingAnchor.constraint(equalTo: avatarView.trailingAnchor, constant: 10),
+            // Action bar (right-aligned, same line as subject top)
+            actionBar.topAnchor.constraint(equalTo: view.topAnchor, constant: 24),
+            actionBar.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -28),
 
-            dateLabel.topAnchor.constraint(equalTo: senderLabel.bottomAnchor, constant: 1),
-            dateLabel.leadingAnchor.constraint(equalTo: senderLabel.leadingAnchor),
+            // Avatar
+            avatarCircle.topAnchor.constraint(equalTo: subjectLabel.bottomAnchor, constant: 16),
+            avatarCircle.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 28),
+            avatarCircle.widthAnchor.constraint(equalToConstant: 40),
+            avatarCircle.heightAnchor.constraint(equalToConstant: 40),
+            avatarLabel.centerXAnchor.constraint(equalTo: avatarCircle.centerXAnchor),
+            avatarLabel.centerYAnchor.constraint(equalTo: avatarCircle.centerYAnchor),
 
-            bodyScrollView.topAnchor.constraint(equalTo: avatarView.bottomAnchor, constant: 16),
-            bodyScrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
-            bodyScrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24),
+            // Sender + date on one line
+            senderLabel.topAnchor.constraint(equalTo: avatarCircle.topAnchor, constant: 2),
+            senderLabel.leadingAnchor.constraint(equalTo: avatarCircle.trailingAnchor, constant: 12),
+            dateLabel.centerYAnchor.constraint(equalTo: senderLabel.centerYAnchor),
+            dateLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -28),
+            senderLabel.trailingAnchor.constraint(lessThanOrEqualTo: dateLabel.leadingAnchor, constant: -12),
+
+            // Recipients below sender
+            recipientLabel.topAnchor.constraint(equalTo: senderLabel.bottomAnchor, constant: 2),
+            recipientLabel.leadingAnchor.constraint(equalTo: senderLabel.leadingAnchor),
+            recipientLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -28),
+
+            // Separator
+            headerSeparator.topAnchor.constraint(equalTo: avatarCircle.bottomAnchor, constant: 16),
+            headerSeparator.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 28),
+            headerSeparator.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -28),
+
+            // Body
+            bodyScrollView.topAnchor.constraint(equalTo: headerSeparator.bottomAnchor, constant: 16),
+            bodyScrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 28),
+            bodyScrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -28),
             bodyScrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -16),
 
-            emptyLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            emptyLabel.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            // Empty state
+            emptyContainer.topAnchor.constraint(equalTo: view.topAnchor),
+            emptyContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            emptyContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            emptyContainer.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
     }
 
+    // MARK: - Display
+
     func display(header: EmailHeader, body: EmailBody?) {
-        emptyLabel.isHidden = true
-        subjectLabel.isHidden = false
-        avatarView.isHidden = false
-        senderLabel.isHidden = false
-        dateLabel.isHidden = false
-        bodyScrollView.isHidden = false
+        emptyContainer.isHidden = true
+        for v in [subjectLabel, avatarCircle, avatarLabel, senderLabel, dateLabel, recipientLabel, actionBar, headerSeparator, bodyScrollView] as [NSView] {
+            v.isHidden = false
+        }
 
+        // Subject
         subjectLabel.stringValue = header.subject ?? "(no subject)"
-        senderLabel.stringValue = header.senderName ?? header.senderEmail
-        dateLabel.stringValue = Self.dateFormatter.string(from: header.date)
 
-        // Avatar initials
-        let name = header.senderName ?? header.senderEmail
-        let initials = name.split(separator: " ").prefix(2).compactMap(\.first).map(String.init).joined()
-        avatarView.stringValue = initials.isEmpty ? "?" : initials.uppercased()
+        // Sender
+        let displayName = header.senderName ?? header.senderEmail
+        senderLabel.stringValue = displayName
 
-        // Render body
-        if let htmlBody = body?.htmlBody {
+        // Date (relative)
+        dateLabel.stringValue = Self.relativeDate(header.date)
+
+        // Recipients
+        recipientLabel.stringValue = "to me"
+
+        // Avatar (gradient circle with initials)
+        let initials = displayName.split(separator: " ").prefix(2).compactMap(\.first).map(String.init).joined().uppercased()
+        avatarLabel.stringValue = initials.isEmpty ? "?" : initials
+        let color = Self.avatarColor(for: header.senderEmail)
+        avatarCircle.layer?.backgroundColor = color.cgColor
+
+        // Body
+        if let htmlBody = body?.htmlBody, !htmlBody.isEmpty {
             bodyTextView.textStorage?.setAttributedString(Self.htmlToAttributedString(htmlBody))
-        } else if let textBody = body?.textBody {
-            bodyTextView.textStorage?.setAttributedString(Self.plainTextToAttributedString(textBody))
+        } else if let textBody = body?.textBody, !textBody.isEmpty {
+            bodyTextView.textStorage?.setAttributedString(Self.renderPlainText(textBody))
         } else {
-            bodyTextView.string = "(loading...)"
+            bodyTextView.textStorage?.setAttributedString(Self.renderPlainText("(no content)"))
         }
 
         bodyTextView.scrollToBeginningOfDocument(nil)
     }
 
-    func clear() {
-        showEmpty()
-    }
+    func clear() { showEmpty() }
 
     private func showEmpty() {
-        emptyLabel.isHidden = false
-        subjectLabel.isHidden = true
-        avatarView.isHidden = true
-        senderLabel.isHidden = true
-        dateLabel.isHidden = true
-        bodyScrollView.isHidden = true
+        emptyContainer.isHidden = false
+        for v in [subjectLabel, avatarCircle, avatarLabel, senderLabel, dateLabel, recipientLabel, actionBar, headerSeparator, bodyScrollView] as [NSView] {
+            v.isHidden = true
+        }
     }
 
-    // MARK: - Text Rendering (No WebKit)
+    // MARK: - Actions
 
-    /// Converts HTML email body to NSAttributedString.
-    /// This is the no-WebKit approach: graceful degradation for complex HTML,
-    /// but keeps memory under 30MB always.
+    @objc private func replyClicked() { onReply?() }
+    @objc private func forwardClicked() { onForward?() }
+    @objc private func archiveClicked() { onArchive?() }
+    @objc private func deleteClicked() { onDelete?() }
+
+    // MARK: - Text Rendering
+
     private static func htmlToAttributedString(_ html: String) -> NSAttributedString {
         guard let data = html.data(using: .utf8) else {
-            return plainTextToAttributedString(html)
+            return renderPlainText(html)
         }
 
         let options: [NSAttributedString.DocumentReadingOptionKey: Any] = [
@@ -181,37 +301,108 @@ final class DetailView: NSObject {
             .characterEncoding: String.Encoding.utf8.rawValue,
         ]
 
-        if let attributed = try? NSAttributedString(data: data, options: options, documentAttributes: nil) {
-            // Apply our preferred font styling over the HTML defaults
-            let mutable = NSMutableAttributedString(attributedString: attributed)
-            let fullRange = NSRange(location: 0, length: mutable.length)
-            mutable.enumerateAttribute(.font, in: fullRange) { value, range, _ in
-                guard let font = value as? NSFont else { return }
-                let newFont: NSFont
-                if font.fontDescriptor.symbolicTraits.contains(.bold) {
-                    newFont = .systemFont(ofSize: 14, weight: .semibold)
-                } else if font.fontDescriptor.symbolicTraits.contains(.italic) {
-                    newFont = .systemFont(ofSize: 14, weight: .regular) // TODO: italic variant
-                } else {
-                    newFont = .systemFont(ofSize: 14)
-                }
-                mutable.addAttribute(.font, value: newFont, range: range)
-            }
-            return mutable
+        guard let attributed = try? NSAttributedString(data: data, options: options, documentAttributes: nil) else {
+            return renderPlainText(html)
         }
 
-        return plainTextToAttributedString(html)
+        let mutable = NSMutableAttributedString(attributedString: attributed)
+        let fullRange = NSRange(location: 0, length: mutable.length)
+
+        // Restyle fonts to SF Pro with proper sizing
+        mutable.enumerateAttribute(.font, in: fullRange) { value, range, _ in
+            guard let font = value as? NSFont else { return }
+            let traits = font.fontDescriptor.symbolicTraits
+            let size: CGFloat = 15
+            let newFont: NSFont
+            if traits.contains(.bold) && traits.contains(.italic) {
+                newFont = NSFont.systemFont(ofSize: size, weight: .semibold) // No italic variant easily
+            } else if traits.contains(.bold) {
+                newFont = .systemFont(ofSize: size, weight: .semibold)
+            } else if traits.contains(.italic) {
+                newFont = NSFontManager.shared.convert(.systemFont(ofSize: size), toHaveTrait: .italicFontMask)
+            } else {
+                newFont = .systemFont(ofSize: size)
+            }
+            mutable.addAttribute(.font, value: newFont, range: range)
+        }
+
+        // Proper line height
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.lineSpacing = 5
+        paragraphStyle.paragraphSpacing = 10
+        mutable.addAttribute(.paragraphStyle, value: paragraphStyle, range: fullRange)
+
+        // Link styling
+        mutable.enumerateAttribute(.link, in: fullRange) { value, range, _ in
+            if value != nil {
+                mutable.addAttribute(.foregroundColor, value: NSColor.controlAccentColor, range: range)
+            }
+        }
+
+        return mutable
     }
 
-    private static func plainTextToAttributedString(_ text: String) -> NSAttributedString {
-        let paragraphStyle = NSMutableParagraphStyle()
-        paragraphStyle.lineSpacing = 4
-        paragraphStyle.paragraphSpacing = 8
+    /// Renders plain text with quote detection.
+    /// Lines starting with > get a left border + dimmed color (reply style).
+    private static func renderPlainText(_ text: String) -> NSAttributedString {
+        let result = NSMutableAttributedString()
+        let lines = text.components(separatedBy: "\n")
 
-        return NSAttributedString(string: text, attributes: [
-            .font: NSFont.systemFont(ofSize: 14),
+        let normalStyle = NSMutableParagraphStyle()
+        normalStyle.lineSpacing = 5
+        normalStyle.paragraphSpacing = 6
+
+        let quoteStyle = NSMutableParagraphStyle()
+        quoteStyle.lineSpacing = 4
+        quoteStyle.paragraphSpacing = 2
+        quoteStyle.headIndent = 16
+        quoteStyle.firstLineHeadIndent = 16
+
+        let normalAttrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 15),
             .foregroundColor: NSColor.labelColor,
-            .paragraphStyle: paragraphStyle,
-        ])
+            .paragraphStyle: normalStyle,
+        ]
+
+        let quoteAttrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 14),
+            .foregroundColor: NSColor.secondaryLabelColor,
+            .paragraphStyle: quoteStyle,
+        ]
+
+        for (i, line) in lines.enumerated() {
+            let isQuote = line.hasPrefix(">")
+            let cleanLine = isQuote ? String(line.dropFirst().trimmingCharacters(in: .whitespaces)) : line
+            let attrs = isQuote ? quoteAttrs : normalAttrs
+            result.append(NSAttributedString(string: cleanLine, attributes: attrs))
+            if i < lines.count - 1 {
+                result.append(NSAttributedString(string: "\n", attributes: attrs))
+            }
+        }
+
+        return result
+    }
+
+    // MARK: - Helpers
+
+    private static func relativeDate(_ date: Date) -> String {
+        let now = Date()
+        let seconds = now.timeIntervalSince(date)
+
+        if seconds < 60 { return "just now" }
+        if seconds < 3600 { return "\(Int(seconds / 60))m ago" }
+        if seconds < 86400 { return "\(Int(seconds / 3600))h ago" }
+        if seconds < 172800 { return "Yesterday" }
+        if seconds < 604800 { return "\(Int(seconds / 86400))d ago" }
+
+        let f = DateFormatter()
+        f.dateStyle = .medium
+        f.timeStyle = .short
+        return f.string(from: date)
+    }
+
+    private static func avatarColor(for email: String) -> NSColor {
+        let hash = abs(email.hashValue)
+        return avatarColors[hash % avatarColors.count]
     }
 }
