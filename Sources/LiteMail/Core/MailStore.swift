@@ -148,6 +148,13 @@ actor MailStore {
             }
         }
 
+        // v3: IMAP username field (when different from email)
+        migrator.registerMigration("v3_imap_username") { db in
+            try db.alter(table: "accounts") { t in
+                t.add(column: "imap_username", .text)
+            }
+        }
+
         try migrator.migrate(dbPool)
     }
 
@@ -400,6 +407,7 @@ struct AccountRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var emailAddress: String
     var displayName: String?
     var protocolType: String
+    var imapUsername: String?
     var imapHost: String?
     var imapPort: Int?
     var smtpHost: String?
@@ -415,6 +423,7 @@ struct AccountRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         case emailAddress = "email_address"
         case displayName = "display_name"
         case protocolType = "protocol_type"
+        case imapUsername = "imap_username"
         case imapHost = "imap_host"
         case imapPort = "imap_port"
         case smtpHost = "smtp_host"

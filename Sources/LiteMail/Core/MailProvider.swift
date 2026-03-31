@@ -118,6 +118,7 @@ struct AccountConfig: Sendable {
     let emailAddress: String
     let displayName: String?
     let protocolType: ProtocolType
+    let imapUsername: String?       // If different from email (e.g. "hai" instead of "hai@domain.com")
     let imapHost: String?
     let imapPort: Int?
     let smtpHost: String?

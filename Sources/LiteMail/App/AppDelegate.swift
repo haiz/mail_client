@@ -274,21 +274,75 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func showAddAccount() {
         guard let window = windowController?.window else { return }
         let sheet = AddAccountSheet()
-        sheet.onAddAccount = { [weak self] config, password in
-            guard let self else { return }
+        sheet.onAddAccount = { [weak self] config, password, completion in
+            guard let self, let accountManager = self.accountManager else {
+                completion("App not initialized")
+                return
+            }
+
             Task {
-                if let password {
-                    self.accountManager?.authManager.storePassword(accountId: config.id, password: password)
-                }
-                try? await self.accountManager?.addAccount(config)
-                await MainActor.run {
-                    self.addAccountSheet = nil  // Release after use
-                    self.loadSidebar()
+                do {
+                    // Step 1: Store credentials before connecting
+                    if let password {
+                        accountManager.authManager.storePassword(accountId: config.id, password: password)
+                    }
+
+                    // Step 2: Add account to DB + create provider
+                    try await accountManager.addAccount(config)
+
+                    // Step 3: Try to connect — this is the real test
+                    guard let provider = await accountManager.getProvider(for: config.id) else {
+                        throw AddAccountError.providerNotCreated
+                    }
+                    try await provider.connect()
+
+                    // Step 4: Connection succeeded — run initial sync
+                    try? await provider.performInitialSync()
+
+                    await MainActor.run {
+                        self.addAccountSheet = nil
+                        self.loadSidebar()
+                        self.loadMessages()
+                        completion(nil) // Success
+                    }
+                } catch {
+                    // Connection failed — remove the account we just added
+                    try? await accountManager.removeAccount(id: config.id)
+
+                    let errorMsg = Self.friendlyError(error)
+                    await MainActor.run {
+                        completion(errorMsg)
+                    }
                 }
             }
         }
-        self.addAccountSheet = sheet  // Retain reference
+        self.addAccountSheet = sheet
         sheet.show(relativeTo: window)
+    }
+
+    private enum AddAccountError: Error, LocalizedError {
+        case providerNotCreated
+        var errorDescription: String? { "Failed to create mail provider." }
+    }
+
+    private static func friendlyError(_ error: Error) -> String {
+        let msg = error.localizedDescription
+        if msg.contains("SSL") || msg.contains("TLS") || msg.contains("handshake") {
+            return "Connection failed: SSL/TLS error. Check host and port."
+        }
+        if msg.contains("auth") || msg.contains("Auth") || msg.contains("login") || msg.contains("Login") {
+            return "Authentication failed. Check your email and password."
+        }
+        if msg.contains("resolve") || msg.contains("host") || msg.contains("DNS") {
+            return "Server not found. Check the hostname."
+        }
+        if msg.contains("timeout") || msg.contains("Timeout") {
+            return "Connection timed out. Server may be unreachable."
+        }
+        if msg.contains("refused") || msg.contains("Refused") {
+            return "Connection refused. Check host and port."
+        }
+        return "Connection failed: \(msg)"
     }
 
     private func loadSidebar() {

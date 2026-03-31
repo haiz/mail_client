@@ -19,6 +19,9 @@ actor IMAPProvider: MailProvider {
 
     var isConnected: Bool { imapServer != nil }
 
+    /// Username for IMAP login. Uses imapUsername if set, otherwise email address.
+    private var loginUsername: String { config.imapUsername ?? emailAddress }
+
     init(config: AccountConfig, authManager: AuthManager, store: MailStore) {
         self.accountId = config.id
         self.emailAddress = config.emailAddress
@@ -42,7 +45,7 @@ actor IMAPProvider: MailProvider {
             try await server.authenticateXOAUTH2(email: emailAddress, accessToken: token)
         case .password:
             let password = authManager.getPassword(accountId: accountId) ?? ""
-            try await server.login(username: emailAddress, password: password)
+            try await server.login(username: loginUsername, password: password)
         case .bearer:
             break // JMAP-only, not used for IMAP
         }
@@ -277,7 +280,7 @@ actor IMAPProvider: MailProvider {
                 try await server.authenticateXOAUTH2(email: emailAddress, accessToken: token)
             case .password:
                 let password = authManager.getPassword(accountId: accountId) ?? ""
-                try await server.login(username: emailAddress, password: password)
+                try await server.login(username: loginUsername, password: password)
             case .bearer:
                 break
             }

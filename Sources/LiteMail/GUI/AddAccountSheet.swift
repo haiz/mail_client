@@ -14,6 +14,7 @@ final class AddAccountSheet: NSObject {
 
     // Manual config fields (shown after discovery or on fallback)
     private let protocolPicker: NSPopUpButton
+    private let usernameField: NSTextField
     private let hostField: NSTextField
     private let portField: NSTextField
     private let smtpHostField: NSTextField
@@ -23,8 +24,10 @@ final class AddAccountSheet: NSObject {
 
     private var discoveryResult: AutoDiscovery.Result?
 
-    /// Called when account is confirmed. Returns the full AccountConfig.
-    var onAddAccount: ((AccountConfig, String?) -> Void)?  // (config, password/token)
+    /// Called when user clicks Connect. Returns config + password.
+    /// The caller must attempt connection and call the completion handler
+    /// with nil on success or an error message on failure.
+    var onAddAccount: ((AccountConfig, String?, @escaping (String?) -> Void) -> Void)?
 
     override init() {
         sheet = NSWindow(
@@ -60,6 +63,9 @@ final class AddAccountSheet: NSObject {
         // Manual config fields
         protocolPicker = NSPopUpButton()
         protocolPicker.addItems(withTitles: ["IMAP", "JMAP"])
+
+        usernameField = NSTextField()
+        usernameField.placeholderString = "Username (default: email address)"
 
         hostField = NSTextField()
         hostField.placeholderString = "imap.example.com"
@@ -125,6 +131,7 @@ final class AddAccountSheet: NSObject {
         }
 
         manualStack.addArrangedSubview(row("Protocol:", protocolPicker))
+        manualStack.addArrangedSubview(row("Username:", usernameField))
         manualStack.addArrangedSubview(row("Server:", hostField))
         manualStack.addArrangedSubview(row("Port:", portField))
         manualStack.addArrangedSubview(row("SMTP:", smtpHostField))
@@ -153,6 +160,7 @@ final class AddAccountSheet: NSObject {
             mainStack.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -24),
 
             emailField.widthAnchor.constraint(equalToConstant: 380),
+            usernameField.widthAnchor.constraint(equalToConstant: 280),
             hostField.widthAnchor.constraint(equalToConstant: 280),
             smtpHostField.widthAnchor.constraint(equalToConstant: 280),
             passwordField.widthAnchor.constraint(equalToConstant: 280),
@@ -228,11 +236,14 @@ final class AddAccountSheet: NSObject {
         let isJMAP = protocolPicker.titleOfSelectedItem == "JMAP"
         let password = passwordField.stringValue
 
+        let username = usernameField.stringValue.trimmingCharacters(in: .whitespaces)
+
         let config = AccountConfig(
             id: UUID().uuidString,
             emailAddress: email,
             displayName: nil,
             protocolType: isJMAP ? .jmap : .imap,
+            imapUsername: username.isEmpty ? nil : username,
             imapHost: isJMAP ? nil : hostField.stringValue.isEmpty ? nil : hostField.stringValue,
             imapPort: Int(portField.stringValue),
             smtpHost: smtpHostField.stringValue.isEmpty ? nil : smtpHostField.stringValue,
@@ -243,7 +254,34 @@ final class AddAccountSheet: NSObject {
             isDefault: false
         )
 
-        onAddAccount?(config, password.isEmpty ? nil : password)
-        sheet.sheetParent?.endSheet(sheet)
+        // Show connecting state
+        statusLabel.stringValue = "Connecting..."
+        statusLabel.textColor = .secondaryLabelColor
+        statusLabel.isHidden = false
+        progressIndicator.isHidden = false
+        progressIndicator.startAnimation(nil)
+        addButton.isEnabled = false
+        cancelButton.isEnabled = false
+
+        onAddAccount?(config, password.isEmpty ? nil : password) { [weak self] errorMessage in
+            guard let self else { return }
+            DispatchQueue.main.async {
+                self.progressIndicator.stopAnimation(nil)
+                self.progressIndicator.isHidden = true
+                self.addButton.isEnabled = true
+                self.cancelButton.isEnabled = true
+
+                if let errorMessage {
+                    // Connection failed — show error, stay on sheet
+                    self.statusLabel.stringValue = errorMessage
+                    self.statusLabel.textColor = .systemRed
+                } else {
+                    // Success — close sheet
+                    self.statusLabel.stringValue = "Connected!"
+                    self.statusLabel.textColor = .systemGreen
+                    self.sheet.sheetParent?.endSheet(self.sheet)
+                }
+            }
+        }
     }
 }
