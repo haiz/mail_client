@@ -13,6 +13,7 @@ let package = Package(
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.0.0"),
         .package(url: "https://github.com/Cocoanetics/SwiftMail.git", from: "1.0.0"),
         .package(url: "https://github.com/openid/AppAuth-iOS.git", from: "1.7.0"),
+        .package(url: "https://github.com/kukushechkin/swift-jmap-client.git", from: "0.3.0"),
     ],
     targets: [
         .executableTarget(
@@ -21,6 +22,7 @@ let package = Package(
                 .product(name: "GRDB", package: "GRDB.swift"),
                 .product(name: "SwiftMail", package: "SwiftMail"),
                 .product(name: "AppAuth", package: "AppAuth-iOS"),
+                .product(name: "JMAPClient", package: "swift-jmap-client"),
             ],
             path: "Sources/LiteMail"
         ),

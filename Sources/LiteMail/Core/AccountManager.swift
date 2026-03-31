@@ -214,8 +214,7 @@ actor AccountManager: MailEngineProtocol {
         case .imap:
             return IMAPProvider(config: config, authManager: authManager, store: store)
         case .jmap:
-            // PR2: JMAPProvider
-            fatalError("JMAP support not yet implemented")
+            return JMAPProvider(config: config, authManager: authManager, store: store)
         }
     }
 
