@@ -30,6 +30,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         wc.sidebarView.onAccountSwitched = { [weak self] accountId in
             self?.switchAccount(accountId)
         }
+        wc.sidebarView.onCompose = { [weak self] in
+            self?.openComposer(mode: .compose)
+        }
+        wc.sidebarView.onRefresh = { [weak self] in
+            self?.syncNow()
+        }
 
         setupMainMenu()
         wc.show()
@@ -163,6 +169,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
                 if !header.isRead {
                     try await accountManager.markRead(emailId: header.id, read: true)
+                    loadMessages()
                 }
             } catch {
                 showError("Failed to load message: \(error.localizedDescription)")

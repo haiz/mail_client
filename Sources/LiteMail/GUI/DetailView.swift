@@ -1,7 +1,8 @@
 import AppKit
+import WebKit
 
 /// Email detail view. Superhuman minimalism + Mimestream native feel.
-/// Renders email body as NSAttributedString (no WebKit, <30MB RAM).
+/// Uses WKWebView for HTML emails (with images), NSTextView for plain text.
 final class DetailView: NSObject {
 
     let view: NSView
@@ -19,14 +20,17 @@ final class DetailView: NSObject {
     private let forwardButton: NSButton
     private let archiveButton: NSButton
     private let deleteButton: NSButton
+    private let viewSourceButton: NSButton
     private let actionBar: NSStackView
 
     // Separator
     private let headerSeparator = NSBox()
 
-    // Body
+    // Body — dual renderer
     private let bodyTextView: NSTextView
     private let bodyScrollView: NSScrollView
+    private var webView: WKWebView?  // Created on demand for HTML emails
+    private var sourceButton: NSButton?  // View Source
 
     // Empty state
     private let emptyContainer = NSView()
@@ -39,6 +43,9 @@ final class DetailView: NSObject {
     var onForward: (() -> Void)?
     var onArchive: (() -> Void)?
     var onDelete: (() -> Void)?
+
+    // Store raw source for "View Source"
+    private var rawSource: String?
 
     // Colors for avatar (deterministic by sender)
     private static let avatarColors: [NSColor] = [
@@ -71,7 +78,14 @@ final class DetailView: NSObject {
             btn.heightAnchor.constraint(equalToConstant: 28).isActive = true
         }
 
-        actionBar = NSStackView(views: [replyButton, forwardButton, archiveButton, deleteButton])
+        viewSourceButton = NSButton(image: NSImage(systemSymbolName: "doc.text.magnifyingglass", accessibilityDescription: "View Source")!, target: nil, action: nil)
+        viewSourceButton.bezelStyle = .accessoryBarAction
+        viewSourceButton.isBordered = false
+        viewSourceButton.contentTintColor = .secondaryLabelColor
+        viewSourceButton.widthAnchor.constraint(equalToConstant: 28).isActive = true
+        viewSourceButton.heightAnchor.constraint(equalToConstant: 28).isActive = true
+
+        actionBar = NSStackView(views: [replyButton, forwardButton, archiveButton, deleteButton, viewSourceButton])
         actionBar.spacing = 4
 
         // Body
@@ -102,6 +116,7 @@ final class DetailView: NSObject {
         forwardButton.target = self; forwardButton.action = #selector(forwardClicked)
         archiveButton.target = self; archiveButton.action = #selector(archiveClicked)
         deleteButton.target = self; deleteButton.action = #selector(deleteClicked)
+        viewSourceButton.target = self; viewSourceButton.action = #selector(viewSourceClicked)
 
         setupLayout()
         showEmpty()
@@ -261,16 +276,27 @@ final class DetailView: NSObject {
         let color = Self.avatarColor(for: header.senderEmail)
         avatarCircle.layer?.backgroundColor = color.cgColor
 
-        // Body
+        // Store raw source
+        rawSource = body?.htmlBody ?? body?.textBody
+
+        // Body rendering
         if let htmlBody = body?.htmlBody, !htmlBody.isEmpty {
-            bodyTextView.textStorage?.setAttributedString(Self.htmlToAttributedString(htmlBody))
+            // Use WKWebView for HTML emails (renders images, CSS, etc.)
+            bodyTextView.isHidden = true
+            bodyScrollView.isHidden = true
+            showWebView(html: htmlBody)
         } else if let textBody = body?.textBody, !textBody.isEmpty {
+            hideWebView()
+            bodyTextView.isHidden = false
+            bodyScrollView.isHidden = false
             bodyTextView.textStorage?.setAttributedString(Self.renderPlainText(textBody))
+            bodyTextView.scrollToBeginningOfDocument(nil)
         } else {
+            hideWebView()
+            bodyTextView.isHidden = false
+            bodyScrollView.isHidden = false
             bodyTextView.textStorage?.setAttributedString(Self.renderPlainText("(no content)"))
         }
-
-        bodyTextView.scrollToBeginningOfDocument(nil)
     }
 
     func clear() { showEmpty() }
@@ -282,12 +308,84 @@ final class DetailView: NSObject {
         }
     }
 
+    // MARK: - WebView
+
+    private func showWebView(html: String) {
+        if webView == nil {
+            let config = WKWebViewConfiguration()
+            config.preferences.isElementFullscreenEnabled = false
+            let wv = WKWebView(frame: .zero, configuration: config)
+            wv.translatesAutoresizingMaskIntoConstraints = false
+            view.addSubview(wv)
+            NSLayoutConstraint.activate([
+                wv.topAnchor.constraint(equalTo: headerSeparator.bottomAnchor, constant: 8),
+                wv.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 4),
+                wv.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -4),
+                wv.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -4),
+            ])
+            webView = wv
+        }
+
+        // Wrap HTML with styling to match app theme
+        let styledHTML = """
+        <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+        <style>
+        body { font-family: -apple-system, SF Pro, sans-serif; font-size: 15px;
+               line-height: 1.6; color: #e0e0e0; background: transparent;
+               margin: 16px; word-wrap: break-word; }
+        a { color: #4a9eff; }
+        img { max-width: 100%; height: auto; border-radius: 4px; }
+        blockquote { border-left: 3px solid #3a3a3a; margin: 8px 0; padding-left: 12px; color: #999; }
+        pre, code { background: #1a1a1a; padding: 2px 6px; border-radius: 4px; font-size: 13px; }
+        @media (prefers-color-scheme: light) {
+            body { color: #222; }
+            pre, code { background: #f0f0f0; }
+            blockquote { border-left-color: #ddd; color: #666; }
+        }
+        </style></head><body>\(html)</body></html>
+        """
+
+        webView?.loadHTMLString(styledHTML, baseURL: nil)
+        webView?.isHidden = false
+    }
+
+    private func hideWebView() {
+        webView?.isHidden = true
+        webView?.loadHTMLString("", baseURL: nil)
+    }
+
+    // MARK: - View Source
+
+    func viewSource() {
+        guard let source = rawSource else { return }
+        let panel = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 700, height: 500),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered, defer: false
+        )
+        panel.title = "Email Source"
+        panel.center()
+
+        let textView = NSTextView()
+        textView.isEditable = false
+        textView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        textView.string = source
+        textView.textColor = .labelColor
+
+        let scroll = NSScrollView()
+        scroll.documentView = textView
+        scroll.hasVerticalScroller = true
+        panel.contentView = scroll
+        panel.makeKeyAndOrderFront(nil)
+    }
+
     // MARK: - Actions
 
     @objc private func replyClicked() { onReply?() }
     @objc private func forwardClicked() { onForward?() }
     @objc private func archiveClicked() { onArchive?() }
     @objc private func deleteClicked() { onDelete?() }
+    @objc private func viewSourceClicked() { viewSource() }
 
     // MARK: - Text Rendering
 

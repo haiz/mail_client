@@ -6,6 +6,8 @@ final class SidebarView: NSObject {
 
     let view: NSView
     private let accountPicker: NSPopUpButton
+    private let composeButton: NSButton
+    private let refreshButton: NSButton
     private let scrollView: NSScrollView
     private let outlineView: NSOutlineView
 
@@ -13,6 +15,10 @@ final class SidebarView: NSObject {
     var onFolderSelected: ((String, String) -> Void)?
     /// Called when user switches account via the dropdown.
     var onAccountSwitched: ((String) -> Void)?
+    /// Called when Compose button is clicked.
+    var onCompose: (() -> Void)?
+    /// Called when Refresh button is clicked.
+    var onRefresh: (() -> Void)?
 
     private var accounts: [(id: String, email: String)] = []
     private var currentAccountId: String?
@@ -44,15 +50,34 @@ final class SidebarView: NSObject {
         scrollView.drawsBackground = false
         scrollView.translatesAutoresizingMaskIntoConstraints = false
 
-        // Container: picker on top, folder list below
+        // Action buttons
+        composeButton = NSButton(image: NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: "Compose")!, target: nil, action: nil)
+        composeButton.bezelStyle = .accessoryBarAction
+        composeButton.isBordered = false
+        composeButton.toolTip = "New Message (\u{2318}N)"
+
+        refreshButton = NSButton(image: NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "Refresh")!, target: nil, action: nil)
+        refreshButton.bezelStyle = .accessoryBarAction
+        refreshButton.isBordered = false
+        refreshButton.toolTip = "Sync (\u{2318}\u{21E7}R)"
+
+        let actionBar = NSStackView(views: [composeButton, refreshButton])
+        actionBar.spacing = 2
+        actionBar.translatesAutoresizingMaskIntoConstraints = false
+
+        // Container: picker on top, action bar, folder list below
         let container = NSView()
         container.addSubview(accountPicker)
+        container.addSubview(actionBar)
         container.addSubview(scrollView)
 
         NSLayoutConstraint.activate([
             accountPicker.topAnchor.constraint(equalTo: container.topAnchor, constant: 8),
             accountPicker.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
-            accountPicker.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
+            accountPicker.trailingAnchor.constraint(equalTo: actionBar.leadingAnchor, constant: -4),
+
+            actionBar.centerYAnchor.constraint(equalTo: accountPicker.centerYAnchor),
+            actionBar.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
 
             scrollView.topAnchor.constraint(equalTo: accountPicker.bottomAnchor, constant: 6),
             scrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
@@ -68,6 +93,10 @@ final class SidebarView: NSObject {
         outlineView.delegate = self
         accountPicker.target = self
         accountPicker.action = #selector(accountPickerChanged)
+        composeButton.target = self
+        composeButton.action = #selector(composeClicked)
+        refreshButton.target = self
+        refreshButton.action = #selector(refreshClicked)
 
         loadDefaultMailboxes()
     }
@@ -109,6 +138,9 @@ final class SidebarView: NSObject {
     }
 
     // MARK: - Account Picker
+
+    @objc private func composeClicked() { onCompose?() }
+    @objc private func refreshClicked() { onRefresh?() }
 
     @objc private func accountPickerChanged() {
         guard let selectedId = accountPicker.selectedItem?.representedObject as? String else { return }

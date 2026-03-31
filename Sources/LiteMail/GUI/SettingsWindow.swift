@@ -5,6 +5,7 @@ final class SettingsWindow: NSObject {
 
     private let window: NSWindow
     private let accountTableView: NSTableView
+    private var signatureField: NSTextField?
 
     var onAddAccount: (() -> Void)?
     var onRemoveAccount: ((String) -> Void)?
@@ -18,7 +19,7 @@ final class SettingsWindow: NSObject {
         self.emailCount = emailCount
 
         window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 460, height: 400),
+            contentRect: NSRect(x: 0, y: 0, width: 460, height: 520),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -75,6 +76,20 @@ final class SettingsWindow: NSObject {
         let syncButton = NSButton(title: "Sync All", target: self, action: #selector(syncClicked))
         syncButton.bezelStyle = .rounded
 
+        // Signature section
+        let sigHeader = Self.sectionHeader("Signature")
+        let sigField = NSTextField()
+        sigField.placeholderString = "Your email signature..."
+        sigField.stringValue = UserDefaults.standard.string(forKey: "email_signature") ?? ""
+        sigField.font = .systemFont(ofSize: 12)
+        sigField.lineBreakMode = .byWordWrapping
+        sigField.translatesAutoresizingMaskIntoConstraints = false
+        sigField.widthAnchor.constraint(equalToConstant: 400).isActive = true
+
+        let saveSigButton = NSButton(title: "Save Signature", target: self, action: #selector(saveSignature))
+        saveSigButton.bezelStyle = .rounded
+        self.signatureField = sigField
+
         // About
         let aboutHeader = Self.sectionHeader("About")
         let versionLabel = NSTextField(labelWithString: "LiteMail v0.2.0 — Multi-account IMAP/JMAP")
@@ -85,6 +100,8 @@ final class SettingsWindow: NSObject {
             accountHeader, scrollView, accountButtons,
             Self.spacer(),
             statsHeader, countLabel, syncButton,
+            Self.spacer(),
+            sigHeader, sigField, saveSigButton,
             Self.spacer(),
             aboutHeader, versionLabel,
         ])
@@ -129,6 +146,15 @@ final class SettingsWindow: NSObject {
 
     @objc private func syncClicked() {
         onSyncNow?()
+    }
+
+    @objc private func saveSignature() {
+        let sig = signatureField?.stringValue ?? ""
+        UserDefaults.standard.set(sig, forKey: "email_signature")
+        let alert = NSAlert()
+        alert.messageText = "Signature saved"
+        alert.alertStyle = .informational
+        alert.runModal()
     }
 
     private static func sectionHeader(_ title: String) -> NSTextField {

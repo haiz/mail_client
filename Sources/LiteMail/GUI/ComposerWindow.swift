@@ -50,9 +50,10 @@ final class ComposerWindow: NSObject {
         subjectField.placeholderString = "Subject"
         subjectField.font = .systemFont(ofSize: 13)
 
-        // Body
+        // Body — rich text enabled
         bodyTextView = NSTextView()
-        bodyTextView.isRichText = false
+        bodyTextView.isRichText = true
+        bodyTextView.allowsUndo = true
         bodyTextView.font = .systemFont(ofSize: 14)
         bodyTextView.isAutomaticSpellingCorrectionEnabled = true
         bodyTextView.isAutomaticQuoteSubstitutionEnabled = false
@@ -134,8 +135,25 @@ final class ComposerWindow: NSObject {
         sendButton.translatesAutoresizingMaskIntoConstraints = false
         toolbar.addSubview(sendButton)
 
+        // Formatting toolbar
+        let boldBtn = NSButton(title: "B", target: self, action: #selector(toggleBold))
+        boldBtn.font = .boldSystemFont(ofSize: 13)
+        boldBtn.bezelStyle = .accessoryBarAction
+        let italicBtn = NSButton(title: "I", target: self, action: #selector(toggleItalic))
+        italicBtn.font = NSFontManager.shared.convert(.systemFont(ofSize: 13), toHaveTrait: .italicFontMask)
+        italicBtn.bezelStyle = .accessoryBarAction
+        let underlineBtn = NSButton(title: "U", target: self, action: #selector(toggleUnderline))
+        underlineBtn.bezelStyle = .accessoryBarAction
+        let linkBtn = NSButton(image: NSImage(systemSymbolName: "link", accessibilityDescription: "Insert Link")!, target: self, action: #selector(insertLink))
+        linkBtn.bezelStyle = .accessoryBarAction
+
+        let formatBar = NSStackView(views: [boldBtn, italicBtn, underlineBtn, linkBtn])
+        formatBar.spacing = 2
+        formatBar.translatesAutoresizingMaskIntoConstraints = false
+
         container.addSubview(stack)
         container.addSubview(separator)
+        container.addSubview(formatBar)
         container.addSubview(bodyScrollView)
         container.addSubview(toolbar)
 
@@ -148,7 +166,10 @@ final class ComposerWindow: NSObject {
             separator.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             separator.trailingAnchor.constraint(equalTo: container.trailingAnchor),
 
-            bodyScrollView.topAnchor.constraint(equalTo: separator.bottomAnchor),
+            formatBar.topAnchor.constraint(equalTo: separator.bottomAnchor, constant: 4),
+            formatBar.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
+
+            bodyScrollView.topAnchor.constraint(equalTo: formatBar.bottomAnchor, constant: 4),
             bodyScrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             bodyScrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             bodyScrollView.bottomAnchor.constraint(equalTo: toolbar.topAnchor),
@@ -168,9 +189,13 @@ final class ComposerWindow: NSObject {
     // MARK: - Prefill
 
     private func prefill(mode: Mode) {
+        // Auto-append signature
+        let signature = UserDefaults.standard.string(forKey: "email_signature") ?? ""
+        let signatureBlock = signature.isEmpty ? "" : "\n\n--\n\(signature)"
+
         switch mode {
         case .compose:
-            break
+            bodyTextView.string = signatureBlock
 
         case .reply(let header, let body):
             toField.stringValue = header.senderEmail
@@ -197,6 +222,74 @@ final class ComposerWindow: NSObject {
     }
 
     // MARK: - Actions
+
+    @objc private func toggleBold() {
+        NSFontManager.shared.addFontTrait(nil)
+        // Trigger bold via NSFontManager
+        let range = bodyTextView.selectedRange()
+        guard range.length > 0, let storage = bodyTextView.textStorage else { return }
+        storage.enumerateAttribute(.font, in: range) { value, subRange, _ in
+            guard let font = value as? NSFont else { return }
+            let newFont: NSFont
+            if font.fontDescriptor.symbolicTraits.contains(.bold) {
+                newFont = NSFontManager.shared.convert(font, toNotHaveTrait: .boldFontMask)
+            } else {
+                newFont = NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask)
+            }
+            storage.addAttribute(.font, value: newFont, range: subRange)
+        }
+    }
+
+    @objc private func toggleItalic() {
+        let range = bodyTextView.selectedRange()
+        guard range.length > 0, let storage = bodyTextView.textStorage else { return }
+        storage.enumerateAttribute(.font, in: range) { value, subRange, _ in
+            guard let font = value as? NSFont else { return }
+            let newFont: NSFont
+            if font.fontDescriptor.symbolicTraits.contains(.italic) {
+                newFont = NSFontManager.shared.convert(font, toNotHaveTrait: .italicFontMask)
+            } else {
+                newFont = NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask)
+            }
+            storage.addAttribute(.font, value: newFont, range: subRange)
+        }
+    }
+
+    @objc private func toggleUnderline() {
+        let range = bodyTextView.selectedRange()
+        guard range.length > 0, let storage = bodyTextView.textStorage else { return }
+        let hasUnderline = storage.attribute(.underlineStyle, at: range.location, effectiveRange: nil) as? Int
+        if hasUnderline != nil && hasUnderline != 0 {
+            storage.removeAttribute(.underlineStyle, range: range)
+        } else {
+            storage.addAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, range: range)
+        }
+    }
+
+    @objc private func insertLink() {
+        let alert = NSAlert()
+        alert.messageText = "Insert Link"
+        alert.addButton(withTitle: "Insert")
+        alert.addButton(withTitle: "Cancel")
+
+        let urlField = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+        urlField.placeholderString = "https://example.com"
+        alert.accessoryView = urlField
+
+        if alert.runModal() == .alertFirstButtonReturn {
+            let url = urlField.stringValue
+            guard !url.isEmpty else { return }
+            let range = bodyTextView.selectedRange()
+            let linkText = range.length > 0 ? (bodyTextView.string as NSString).substring(with: range) : url
+            let attributed = NSMutableAttributedString(string: linkText, attributes: [
+                .link: url,
+                .foregroundColor: NSColor.controlAccentColor,
+                .underlineStyle: NSUnderlineStyle.single.rawValue,
+                .font: NSFont.systemFont(ofSize: 14),
+            ])
+            bodyTextView.textStorage?.replaceCharacters(in: range, with: attributed)
+        }
+    }
 
     @objc private func sendClicked() {
         let message = buildMessage()
