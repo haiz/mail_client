@@ -27,6 +27,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         wc.messageListView.onSearchChanged = { [weak self] query in
             self?.performSearch(query: query)
         }
+        wc.sidebarView.onAccountSwitched = { [weak self] accountId in
+            self?.switchAccount(accountId)
+        }
 
         setupMainMenu()
         wc.show()
@@ -349,17 +352,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let accountManager else { return }
         Task { @MainActor in
             let accounts = try await accountManager.listAccounts()
-            var sidebarData: [(accountId: String, email: String, folders: [MailFolder])] = []
 
-            for account in accounts {
-                let folders = try await accountManager.listFolders(accountId: account.id)
-                // If no folders from DB yet, show defaults
-                let displayFolders = folders.isEmpty ? Self.defaultFolders() : folders
-                sidebarData.append((accountId: account.id, email: account.emailAddress, folders: displayFolders))
-            }
+            // Set account list in dropdown
+            let accountList = accounts.map { (id: $0.id, email: $0.emailAddress) }
+            windowController?.sidebarView.setAccounts(accountList, activeId: currentAccountId)
 
-            windowController?.sidebarView.updateAccounts(sidebarData)
+            // Load folders for the active account
+            loadFoldersForCurrentAccount()
         }
+    }
+
+    private func loadFoldersForCurrentAccount() {
+        guard let accountManager, let accountId = currentAccountId else { return }
+        Task { @MainActor in
+            let folders = try await accountManager.listFolders(accountId: accountId)
+            let displayFolders = folders.isEmpty ? Self.defaultFolders() : folders
+            windowController?.sidebarView.updateFolders(displayFolders)
+        }
+    }
+
+    private func switchAccount(_ accountId: String) {
+        currentAccountId = accountId
+        currentFolder = "INBOX"
+        loadFoldersForCurrentAccount()
+        loadMessages()
     }
 
     private static func defaultFolders() -> [MailFolder] {

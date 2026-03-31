@@ -1,19 +1,29 @@
 import AppKit
 
-/// Sidebar showing mailboxes and labels with unread counts.
-/// Uses NSOutlineView for hierarchical folder display.
+/// Sidebar with account switcher dropdown at top, folder list below.
+/// One account active at a time.
 final class SidebarView: NSObject {
 
     let view: NSView
+    private let accountPicker: NSPopUpButton
     private let scrollView: NSScrollView
     private let outlineView: NSOutlineView
 
-    /// (accountId, folderId)
+    /// Called when a folder is selected. (accountId, folderId)
     var onFolderSelected: ((String, String) -> Void)?
+    /// Called when user switches account via the dropdown.
+    var onAccountSwitched: ((String) -> Void)?
 
+    private var accounts: [(id: String, email: String)] = []
+    private var currentAccountId: String?
     private var mailboxes: [SidebarItem] = []
 
     override init() {
+        // Account picker dropdown
+        accountPicker = NSPopUpButton()
+        accountPicker.font = .systemFont(ofSize: 12, weight: .medium)
+        accountPicker.translatesAutoresizingMaskIntoConstraints = false
+
         // Outline view
         outlineView = NSOutlineView()
         outlineView.headerView = nil
@@ -32,50 +42,84 @@ final class SidebarView: NSObject {
         scrollView.hasVerticalScroller = true
         scrollView.autohidesScrollers = true
         scrollView.drawsBackground = false
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
 
-        view = scrollView
+        // Container: picker on top, folder list below
+        let container = NSView()
+        container.addSubview(accountPicker)
+        container.addSubview(scrollView)
+
+        NSLayoutConstraint.activate([
+            accountPicker.topAnchor.constraint(equalTo: container.topAnchor, constant: 8),
+            accountPicker.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
+            accountPicker.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
+
+            scrollView.topAnchor.constraint(equalTo: accountPicker.bottomAnchor, constant: 6),
+            scrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+        ])
+
+        view = container
 
         super.init()
 
         outlineView.dataSource = self
         outlineView.delegate = self
+        accountPicker.target = self
+        accountPicker.action = #selector(accountPickerChanged)
 
-        // Default mailboxes
         loadDefaultMailboxes()
     }
 
-    /// Updates sidebar with multiple accounts, each showing its folders.
-    func updateAccounts(_ accounts: [(accountId: String, email: String, folders: [MailFolder])]) {
-        mailboxes = accounts.map { account in
-            let children = account.folders.map { folder in
-                let icon = Self.iconForFolder(folder.id)
-                return SidebarItem(title: folder.name, icon: icon, folderId: folder.id, unreadCount: folder.unreadCount, accountId: account.accountId)
-            }
-            return SidebarItem(title: account.email, icon: "person.circle.fill", folderId: nil, children: children, accountId: account.accountId)
-        }
-        outlineView.reloadData()
-        outlineView.expandItem(nil, expandChildren: true)
+    // MARK: - Public API
 
-        // Select first account's Inbox
-        if let inboxRow = findRow(folderId: "INBOX") {
-            outlineView.selectRowIndexes(IndexSet(integer: inboxRow), byExtendingSelection: false)
+    /// Sets available accounts in the dropdown. Selects the given accountId.
+    func setAccounts(_ accountList: [(id: String, email: String)], activeId: String?) {
+        accounts = accountList
+        accountPicker.removeAllItems()
+
+        for account in accountList {
+            accountPicker.addItem(withTitle: account.email)
+            accountPicker.lastItem?.representedObject = account.id
         }
+
+        if accountList.count <= 1 {
+            accountPicker.isHidden = true
+        } else {
+            accountPicker.isHidden = false
+        }
+
+        if let activeId, let index = accountList.firstIndex(where: { $0.id == activeId }) {
+            accountPicker.selectItem(at: index)
+        }
+        currentAccountId = activeId ?? accountList.first?.id
     }
 
-    func update(folders: [MailFolder]) {
+    /// Updates the folder list for the current account.
+    func updateFolders(_ folders: [MailFolder]) {
         let section = SidebarItem(title: "Mailboxes", icon: nil, folderId: nil, children: folders.map { folder in
             let icon = Self.iconForFolder(folder.id)
-            return SidebarItem(title: folder.name, icon: icon, folderId: folder.id, unreadCount: folder.unreadCount)
+            return SidebarItem(title: folder.name, icon: icon, folderId: folder.id, unreadCount: folder.unreadCount, accountId: currentAccountId)
         })
         mailboxes = [section]
         outlineView.reloadData()
         outlineView.expandItem(nil, expandChildren: true)
 
-        // Select Inbox by default
         if let inboxRow = findRow(folderId: "INBOX") {
             outlineView.selectRowIndexes(IndexSet(integer: inboxRow), byExtendingSelection: false)
         }
     }
+
+    // MARK: - Account Picker
+
+    @objc private func accountPickerChanged() {
+        guard let selectedId = accountPicker.selectedItem?.representedObject as? String else { return }
+        currentAccountId = selectedId
+        onAccountSwitched?(selectedId)
+    }
+
+    // MARK: - Defaults
 
     private func loadDefaultMailboxes() {
         let defaults: [(String, String, String)] = [
@@ -223,19 +267,8 @@ extension SidebarView: NSOutlineViewDelegate {
         let row = outlineView.selectedRow
         guard row >= 0, let item = outlineView.item(atRow: row) as? SidebarItem,
               let folderId = item.folderId else { return }
-        // Walk up to find accountId from parent if not on this item
-        let accountId = item.accountId ?? findAccountId(for: row)
-        onFolderSelected?(accountId ?? "default", folderId)
-    }
-
-    private func findAccountId(for row: Int) -> String? {
-        let item = outlineView.item(atRow: row) as? SidebarItem
-        if let accountId = item?.accountId { return accountId }
-        // Check parent
-        if let parent = outlineView.parent(forItem: item) as? SidebarItem {
-            return parent.accountId
-        }
-        return nil
+        let accountId = item.accountId ?? currentAccountId ?? "default"
+        onFolderSelected?(accountId, folderId)
     }
 }
 
