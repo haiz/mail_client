@@ -212,28 +212,22 @@ final class AddAccountSheet: NSObject {
             progressIndicator.isHidden = true
             addButton.isEnabled = true
 
-            if let result {
-                self.discoveryResult = result
-                let providerName = result.providerName ?? result.protocolType.rawValue.uppercased()
-                statusLabel.stringValue = "Found: \(providerName) (\(result.protocolType.rawValue.uppercased()))"
-                statusLabel.textColor = .systemGreen
+            self.discoveryResult = result
+            let providerName = result.providerName ?? result.protocolType.rawValue.uppercased()
+            statusLabel.stringValue = "Found: \(providerName)"
+            statusLabel.textColor = .systemGreen
 
-                // Pre-fill manual fields
-                protocolPicker.selectItem(withTitle: result.protocolType == .jmap ? "JMAP" : "IMAP")
-                hostField.stringValue = result.imapHost ?? result.jmapUrl ?? ""
-                portField.stringValue = result.imapPort.map(String.init) ?? ""
-                smtpHostField.stringValue = result.smtpHost ?? ""
-                smtpPortField.stringValue = result.smtpPort.map(String.init) ?? ""
+            // Pre-fill manual fields
+            protocolPicker.selectItem(withTitle: result.protocolType == .jmap ? "JMAP" : "IMAP")
+            usernameField.stringValue = result.imapUsername ?? ""
+            hostField.stringValue = result.imapHost ?? result.jmapUrl ?? ""
+            portField.stringValue = result.imapPort.map(String.init) ?? ""
+            smtpHostField.stringValue = result.smtpHost ?? ""
+            smtpPortField.stringValue = result.smtpPort.map(String.init) ?? ""
 
-                // Show manual fields for password entry
-                manualStack.isHidden = false
-                addButton.title = "Connect"
-            } else {
-                statusLabel.stringValue = "Could not auto-detect. Enter settings manually."
-                statusLabel.textColor = .systemOrange
-                manualStack.isHidden = false
-                addButton.title = "Connect"
-            }
+            // Show manual fields for password entry
+            manualStack.isHidden = false
+            addButton.title = "Connect"
         }
     }
 

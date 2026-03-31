@@ -9,6 +9,7 @@ struct AutoDiscovery {
     /// Result of auto-discovery.
     struct Result {
         let protocolType: AccountConfig.ProtocolType
+        let imapUsername: String?
         let imapHost: String?
         let imapPort: Int?
         let smtpHost: String?
@@ -17,12 +18,30 @@ struct AutoDiscovery {
         let authType: AccountConfig.AuthType
         let oauthClientId: String?
         let providerName: String?
+
+        init(protocolType: AccountConfig.ProtocolType, imapUsername: String? = nil,
+             imapHost: String?, imapPort: Int?, smtpHost: String?, smtpPort: Int?,
+             jmapUrl: String?, authType: AccountConfig.AuthType,
+             oauthClientId: String?, providerName: String?) {
+            self.protocolType = protocolType
+            self.imapUsername = imapUsername
+            self.imapHost = imapHost
+            self.imapPort = imapPort
+            self.smtpHost = smtpHost
+            self.smtpPort = smtpPort
+            self.jmapUrl = jmapUrl
+            self.authType = authType
+            self.oauthClientId = oauthClientId
+            self.providerName = providerName
+        }
     }
 
     /// Runs the full discovery chain for an email address.
-    static func discover(email: String) async -> Result? {
+    static func discover(email: String) async -> Result {
         let domain = email.split(separator: "@").last.map(String.init) ?? ""
-        guard !domain.isEmpty else { return nil }
+        guard !domain.isEmpty else {
+            return guessIMAPConfig(email: email, domain: "example.com")
+        }
 
         // Step 1: Provider presets (handles 90%+ of users)
         if let preset = presetFor(domain: domain) {
@@ -39,8 +58,8 @@ struct AutoDiscovery {
             return autoconfig
         }
 
-        // Step 4: No luck
-        return nil
+        // Step 4: Generic IMAP guess — mail.domain.com, username = local part
+        return guessIMAPConfig(email: email, domain: domain)
     }
 
     // MARK: - Provider Presets
@@ -216,5 +235,24 @@ struct AutoDiscovery {
         let match = xml[range]
         let content = match.replacingOccurrences(of: "<\(tag)>", with: "").replacingOccurrences(of: "</\(tag)>", with: "")
         return content.trimmingCharacters(in: .whitespaces)
+    }
+
+    // MARK: - Generic IMAP Guess
+
+    /// For unknown domains, guess common IMAP/SMTP patterns.
+    /// hai@caodev.top → server: mail.caodev.top, username: hai, IMAP 993, SMTP 587
+    private static func guessIMAPConfig(email: String, domain: String) -> Result {
+        let username = email.split(separator: "@").first.map(String.init)
+
+        return Result(
+            protocolType: .imap,
+            imapUsername: username,
+            imapHost: "mail.\(domain)", imapPort: 993,
+            smtpHost: "mail.\(domain)", smtpPort: 587,
+            jmapUrl: nil,
+            authType: .password,
+            oauthClientId: nil,
+            providerName: "IMAP (\(domain))"
+        )
     }
 }
