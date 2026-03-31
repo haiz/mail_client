@@ -31,7 +31,7 @@ final class AddAccountSheet: NSObject {
 
     override init() {
         sheet = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 440, height: 400),
+            contentRect: NSRect(x: 0, y: 0, width: 440, height: 560),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -140,13 +140,13 @@ final class AddAccountSheet: NSObject {
 
         let buttonStack = NSStackView(views: [cancelButton, addButton])
         buttonStack.spacing = 8
+        buttonStack.translatesAutoresizingMaskIntoConstraints = false
 
         let mainStack = NSStackView(views: [
             titleLabel, subtitleLabel,
             emailLabel, emailField,
             statusLabel, progressIndicator,
             manualStack,
-            buttonStack,
         ])
         mainStack.orientation = .vertical
         mainStack.alignment = .leading
@@ -154,10 +154,15 @@ final class AddAccountSheet: NSObject {
         mainStack.translatesAutoresizingMaskIntoConstraints = false
 
         container.addSubview(mainStack)
+        container.addSubview(buttonStack)
         NSLayoutConstraint.activate([
             mainStack.topAnchor.constraint(equalTo: container.topAnchor, constant: 20),
             mainStack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 24),
             mainStack.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -24),
+
+            // Buttons pinned to bottom-right, always visible
+            buttonStack.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -16),
+            buttonStack.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -24),
 
             emailField.widthAnchor.constraint(equalToConstant: 380),
             usernameField.widthAnchor.constraint(equalToConstant: 280),
