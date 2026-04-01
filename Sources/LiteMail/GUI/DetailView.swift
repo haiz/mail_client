@@ -316,6 +316,9 @@ final class DetailView: NSObject {
             config.preferences.isElementFullscreenEnabled = false
             let wv = WKWebView(frame: .zero, configuration: config)
             wv.translatesAutoresizingMaskIntoConstraints = false
+            // Transparent background so app dark theme shows through
+            wv.setValue(false, forKey: "drawsBackground")
+            wv.enclosingScrollView?.drawsBackground = false
             view.addSubview(wv)
             NSLayoutConstraint.activate([
                 wv.topAnchor.constraint(equalTo: headerSeparator.bottomAnchor, constant: 8),
@@ -330,18 +333,28 @@ final class DetailView: NSObject {
         let styledHTML = """
         <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
         <style>
-        body { font-family: -apple-system, SF Pro, sans-serif; font-size: 15px;
-               line-height: 1.6; color: #e0e0e0; background: transparent;
-               margin: 16px; word-wrap: break-word; }
-        a { color: #4a9eff; }
-        img { max-width: 100%; height: auto; border-radius: 4px; }
-        blockquote { border-left: 3px solid #3a3a3a; margin: 8px 0; padding-left: 12px; color: #999; }
-        pre, code { background: #1a1a1a; padding: 2px 6px; border-radius: 4px; font-size: 13px; }
-        @media (prefers-color-scheme: light) {
-            body { color: #222; }
-            pre, code { background: #f0f0f0; }
-            blockquote { border-left-color: #ddd; color: #666; }
+        :root { color-scheme: light dark; }
+        body { font-family: -apple-system, SF Pro, system-ui, sans-serif; font-size: 15px;
+               line-height: 1.65; margin: 20px; word-wrap: break-word; }
+        @media (prefers-color-scheme: dark) {
+            body { color: #e0e0e0; background: #1e1e1e; }
+            a { color: #4a9eff; }
+            blockquote { border-left: 3px solid #444; color: #aaa; }
+            pre, code { background: #2a2a2a; }
+            table { border-color: #444; }
+            td, th { border-color: #444; }
         }
+        @media (prefers-color-scheme: light) {
+            body { color: #222; background: #fff; }
+            a { color: #0066cc; }
+            blockquote { border-left: 3px solid #ddd; color: #666; }
+            pre, code { background: #f5f5f5; }
+        }
+        img { max-width: 100%; height: auto; border-radius: 4px; }
+        blockquote { margin: 8px 0; padding-left: 12px; }
+        pre, code { padding: 2px 6px; border-radius: 4px; font-size: 13px; }
+        table { border-collapse: collapse; max-width: 100%; }
+        td, th { padding: 4px 8px; border: 1px solid; }
         </style></head><body>\(html)</body></html>
         """
 
