@@ -8,6 +8,7 @@ final class UIReviewRunner: NSObject {
     private let outputDir: String
     private var manifest: UIReviewManifest
     private var windowController: MainWindowController?
+    private var webViewFinishedLoading = false
 
     init(outputDir: String) {
         self.outputDir = outputDir
@@ -127,17 +128,35 @@ final class UIReviewRunner: NSObject {
                     EmailBody(emailId: record.id ?? 0, textBody: $0.text, htmlBody: $0.html)
                 }
 
+                let hasHTML = body?.htmlBody.map { !$0.isEmpty } ?? false
+
                 // Must dispatch to main thread for UI updates
+                // Set navigation delegate in the same MainActor block so it's
+                // registered before the RunLoop processes any WebView events.
+                if hasHTML { webViewFinishedLoading = false }
                 await MainActor.run {
                     wc.detailView.display(header: header, body: body)
+                    if hasHTML, let wv = wc.detailView.webView {
+                        wv.navigationDelegate = self
+                    }
                 }
 
-                let hasHTML = body?.htmlBody.map { !$0.isEmpty } ?? false
-                let waitTime: TimeInterval = hasHTML ? 2.0 : 0.3
-
-                // Run the run loop on main thread to allow rendering
-                await MainActor.run {
-                    RunLoop.current.run(until: Date(timeIntervalSinceNow: waitTime))
+                if hasHTML {
+                    // Wait for didFinish/didFail or timeout (5 seconds)
+                    let deadline = Date(timeIntervalSinceNow: 5.0)
+                    while !webViewFinishedLoading && Date() < deadline {
+                        await MainActor.run {
+                            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))
+                        }
+                    }
+                    // Extra 0.3s for final paint
+                    await MainActor.run {
+                        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.3))
+                    }
+                } else {
+                    await MainActor.run {
+                        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.3))
+                    }
                 }
 
                 let sanitizedSubject = Self.sanitizeFilename(header.subject ?? "no_subject")
@@ -236,6 +255,19 @@ struct UIReviewManifest: Codable {
     struct WindowSize: Codable {
         let width: Int
         let height: Int
+    }
+}
+
+// MARK: - WKNavigationDelegate
+
+extension UIReviewRunner: WKNavigationDelegate {
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        webViewFinishedLoading = true
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        print("WebView failed to load: \(error.localizedDescription)")
+        webViewFinishedLoading = true
     }
 }
 

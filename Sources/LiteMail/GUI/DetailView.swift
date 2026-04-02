@@ -29,7 +29,7 @@ final class DetailView: NSObject {
     // Body — dual renderer
     private let bodyTextView: NSTextView
     private let bodyScrollView: NSScrollView
-    private var webView: WKWebView?  // Created on demand for HTML emails
+    private(set) var webView: WKWebView?  // Created on demand for HTML emails
     private var sourceButton: NSButton?  // View Source
 
     // Empty state
