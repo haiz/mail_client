@@ -36,12 +36,17 @@ final class UIReviewRunner: NSObject {
         captureStaticScreens()
 
         // Bridge sync → async for actor-based MailStore
-        let semaphore = DispatchSemaphore(value: 0)
+        // NOTE: Cannot use DispatchSemaphore here — captureEmailsAsync() uses
+        // MainActor.run which needs the main thread, but semaphore.wait() blocks it.
+        // Instead, pump the RunLoop so MainActor work can execute while we wait.
+        var finished = false
         Task {
             await self.captureEmailsAsync()
-            semaphore.signal()
+            finished = true
         }
-        semaphore.wait()
+        while !finished {
+            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))
+        }
 
         writeManifest()
 
