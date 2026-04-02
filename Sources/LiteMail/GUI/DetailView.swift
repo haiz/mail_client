@@ -317,9 +317,8 @@ final class DetailView: NSObject {
             config.preferences.isElementFullscreenEnabled = false
             let wv = WKWebView(frame: .zero, configuration: config)
             wv.translatesAutoresizingMaskIntoConstraints = false
-            // Transparent background so app dark theme shows through
-            wv.setValue(false, forKey: "drawsBackground")
-            wv.enclosingScrollView?.drawsBackground = false
+            // White background — emails are designed for light backgrounds (like Apple Mail)
+            wv.setValue(true, forKey: "drawsBackground")
             view.addSubview(wv)
             NSLayoutConstraint.activate([
                 wv.topAnchor.constraint(equalTo: headerSeparator.bottomAnchor, constant: 8),
@@ -330,32 +329,21 @@ final class DetailView: NSObject {
             webView = wv
         }
 
-        // Wrap HTML with styling to match app theme
+        // Minimal CSS wrapper — preserve original email design (like Apple Mail).
+        // Don't force dark mode on emails: most HTML emails are designed for light backgrounds.
+        // Only add light safety defaults; let the email's own CSS take priority.
         let styledHTML = """
         <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
         <style>
-        :root { color-scheme: light dark; }
         body { font-family: -apple-system, SF Pro, system-ui, sans-serif; font-size: 15px;
-               line-height: 1.65; margin: 20px; word-wrap: break-word; }
-        @media (prefers-color-scheme: dark) {
-            body { color: #e0e0e0; background: #1e1e1e; }
-            a { color: #4a9eff; }
-            blockquote { border-left: 3px solid #444; color: #aaa; }
-            pre, code { background: #2a2a2a; }
-            table { border-color: #444; }
-            td, th { border-color: #444; }
-        }
-        @media (prefers-color-scheme: light) {
-            body { color: #222; background: #fff; }
-            a { color: #0066cc; }
-            blockquote { border-left: 3px solid #ddd; color: #666; }
-            pre, code { background: #f5f5f5; }
-        }
-        img { max-width: 100%; height: auto; border-radius: 4px; }
-        blockquote { margin: 8px 0; padding-left: 12px; }
-        pre, code { padding: 2px 6px; border-radius: 4px; font-size: 13px; }
-        table { border-collapse: collapse; max-width: 100%; }
-        td, th { padding: 4px 8px; border: 1px solid; }
+               line-height: 1.65; margin: 16px; word-wrap: break-word;
+               color: #222; background: #fff; }
+        a { color: #0066cc; }
+        img { max-width: 100%; height: auto; }
+        blockquote { margin: 8px 0; padding-left: 12px;
+                     border-left: 3px solid #ddd; color: #666; }
+        pre, code { padding: 2px 6px; border-radius: 4px; font-size: 13px;
+                    background: #f5f5f5; }
         </style></head><body>\(html)</body></html>
         """
 
