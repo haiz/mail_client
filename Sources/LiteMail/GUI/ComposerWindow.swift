@@ -4,7 +4,7 @@ import AppKit
 /// Draft auto-saves every 5 seconds to the outbox.
 final class ComposerWindow: NSObject {
 
-    private let window: NSWindow
+    private(set) var window: NSWindow
     private let toField: NSTextField
     private let ccField: NSTextField
     private let subjectField: NSTextField
