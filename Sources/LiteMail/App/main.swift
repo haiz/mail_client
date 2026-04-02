@@ -11,6 +11,8 @@ if args.contains("--ui-review") {
     }
 
     let app = NSApplication.shared
+    app.setActivationPolicy(.regular)
+    app.finishLaunching()
     let runner = UIReviewRunner(outputDir: output)
     runner.run()
 } else {

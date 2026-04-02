@@ -21,10 +21,14 @@ final class UIReviewRunner: NSObject {
     }
 
     func run() {
-        try? FileManager.default.createDirectory(
-            atPath: outputDir,
-            withIntermediateDirectories: true
-        )
+        do {
+            try FileManager.default.createDirectory(
+                atPath: outputDir,
+                withIntermediateDirectories: true
+            )
+        } catch {
+            print("Failed to create output directory: \(error)")
+        }
 
         let wc = MainWindowController()
         windowController = wc
@@ -57,11 +61,13 @@ final class UIReviewRunner: NSObject {
     // MARK: - Static Screens
 
     private func captureStaticScreens() {
-        captureView(windowController!.detailView.view, filename: "01_detail_empty.png", entry: .init(
+        guard let wc = windowController else { return }
+
+        captureView(wc.detailView.view, filename: "01_detail_empty.png", entry: .init(
             file: "01_detail_empty.png", type: "screen", name: "Detail empty state"
         ))
 
-        if let contentView = windowController?.window.contentView {
+        if let contentView = wc.window.contentView {
             captureView(contentView, filename: "02_full_window.png", entry: .init(
                 file: "02_full_window.png", type: "screen", name: "Full window"
             ))
@@ -83,6 +89,8 @@ final class UIReviewRunner: NSObject {
     // MARK: - Email Capture
 
     private func captureEmailsAsync() async {
+        guard let wc = windowController else { return }
+
         let dbDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("LiteMail", isDirectory: true)
         let dbPath = dbDir.appendingPathComponent("mail.sqlite").path
@@ -92,8 +100,11 @@ final class UIReviewRunner: NSObject {
             return
         }
 
-        guard let store = try? MailStore(path: dbPath) else {
-            print("Failed to open database. Skipping email capture.")
+        let store: MailStore
+        do {
+            store = try MailStore(path: dbPath)
+        } catch {
+            print("Failed to open database: \(error)")
             return
         }
 
@@ -118,10 +129,10 @@ final class UIReviewRunner: NSObject {
 
                 // Must dispatch to main thread for UI updates
                 await MainActor.run {
-                    windowController!.detailView.display(header: header, body: body)
+                    wc.detailView.display(header: header, body: body)
                 }
 
-                let hasHTML = body?.htmlBody != nil && !body!.htmlBody!.isEmpty
+                let hasHTML = body?.htmlBody.map { !$0.isEmpty } ?? false
                 let waitTime: TimeInterval = hasHTML ? 2.0 : 0.3
 
                 // Run the run loop on main thread to allow rendering
@@ -133,7 +144,7 @@ final class UIReviewRunner: NSObject {
                 let filename = String(format: "email_%03d_%@.png", emailIndex, sanitizedSubject)
 
                 await MainActor.run {
-                    captureView(windowController!.detailView.view, filename: filename, entry: .init(
+                    captureView(wc.detailView.view, filename: filename, entry: .init(
                         file: filename,
                         type: "email",
                         name: header.subject ?? "(no subject)",
@@ -170,7 +181,11 @@ final class UIReviewRunner: NSObject {
         }
 
         let filePath = (outputDir as NSString).appendingPathComponent(filename)
-        try? pngData.write(to: URL(fileURLWithPath: filePath))
+        do {
+            try pngData.write(to: URL(fileURLWithPath: filePath))
+        } catch {
+            print("Failed to write \(filename): \(error)")
+        }
         manifest.screenshots.append(entry)
     }
 
@@ -179,7 +194,11 @@ final class UIReviewRunner: NSObject {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         guard let data = try? encoder.encode(manifest) else { return }
         let path = (outputDir as NSString).appendingPathComponent("manifest.json")
-        try? data.write(to: URL(fileURLWithPath: path))
+        do {
+            try data.write(to: URL(fileURLWithPath: path))
+        } catch {
+            print("Failed to write manifest: \(error)")
+        }
     }
 
     private static func sanitizeFilename(_ name: String) -> String {
