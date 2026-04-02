@@ -73,7 +73,7 @@ final class DetailView: NSObject {
         for btn in [replyButton, forwardButton, archiveButton, deleteButton] {
             btn.bezelStyle = .accessoryBarAction
             btn.isBordered = false
-            btn.contentTintColor = .secondaryLabelColor
+            btn.contentTintColor = .labelColor
             btn.widthAnchor.constraint(equalToConstant: 28).isActive = true
             btn.heightAnchor.constraint(equalToConstant: 28).isActive = true
         }
@@ -81,7 +81,7 @@ final class DetailView: NSObject {
         viewSourceButton = NSButton(image: NSImage(systemSymbolName: "doc.text.magnifyingglass", accessibilityDescription: "View Source")!, target: nil, action: nil)
         viewSourceButton.bezelStyle = .accessoryBarAction
         viewSourceButton.isBordered = false
-        viewSourceButton.contentTintColor = .secondaryLabelColor
+        viewSourceButton.contentTintColor = .labelColor
         viewSourceButton.widthAnchor.constraint(equalToConstant: 28).isActive = true
         viewSourceButton.heightAnchor.constraint(equalToConstant: 28).isActive = true
 
@@ -109,6 +109,7 @@ final class DetailView: NSObject {
         bodyScrollView.drawsBackground = false
 
         view = NSView()
+        view.wantsLayer = true
 
         super.init()
 
@@ -156,7 +157,7 @@ final class DetailView: NSObject {
 
         // Date: secondary, relative
         dateLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
-        dateLabel.textColor = .tertiaryLabelColor
+        dateLabel.textColor = .secondaryLabelColor
 
         // Recipients
         recipientLabel.font = .systemFont(ofSize: 12)

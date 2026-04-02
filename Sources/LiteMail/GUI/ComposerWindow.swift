@@ -68,6 +68,7 @@ final class ComposerWindow: NSObject {
         // Send button
         sendButton = NSButton(title: "Send", target: nil, action: nil)
         sendButton.bezelStyle = .rounded
+        sendButton.controlSize = .large
         sendButton.keyEquivalent = "\r"
         sendButton.keyEquivalentModifierMask = .command
 
