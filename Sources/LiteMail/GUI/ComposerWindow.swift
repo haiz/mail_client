@@ -71,6 +71,8 @@ final class ComposerWindow: NSObject {
         sendButton.controlSize = .large
         sendButton.keyEquivalent = "\r"
         sendButton.keyEquivalentModifierMask = .command
+        sendButton.contentTintColor = .white
+        sendButton.bezelColor = .controlAccentColor
 
         super.init()
 
