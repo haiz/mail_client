@@ -11,6 +11,7 @@ final class MainWindowController: NSObject {
     let detailView: DetailView
     let statusBar: StatusBar
     private var commandPalette: CommandPalette?
+    private var keyboardMonitor: Any?
 
     /// Callback when a folder is selected in the sidebar. (accountId, folderId)
     var onFolderSelected: ((String, String) -> Void)?
@@ -90,8 +91,8 @@ final class MainWindowController: NSObject {
             self?.onMessageSelected?(header)
         }
 
-        // Keyboard monitor
-        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        // Keyboard monitor — must retain the returned monitor object
+        keyboardMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             self?.handleKeyDown(event)
         }
     }
@@ -104,6 +105,12 @@ final class MainWindowController: NSObject {
         DispatchQueue.main.async { [self] in
             splitView.setPosition(200, ofDividerAt: 0)
             splitView.setPosition(540, ofDividerAt: 1)
+        }
+    }
+
+    deinit {
+        if let monitor = keyboardMonitor {
+            NSEvent.removeMonitor(monitor)
         }
     }
 

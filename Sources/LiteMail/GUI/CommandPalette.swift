@@ -13,6 +13,7 @@ final class CommandPalette: NSObject {
 
     private var allCommands: [PaletteCommand] = []
     private var filteredCommands: [PaletteCommand] = []
+    private var keyboardMonitor: Any?
 
     var isVisible: Bool { panel.isVisible }
 
@@ -102,8 +103,8 @@ final class CommandPalette: NSObject {
         loadCommands()
         filteredCommands = allCommands
 
-        // Monitor Escape key
-        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        // Monitor Escape key — must retain the returned monitor object
+        keyboardMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard self?.isVisible == true else { return event }
             if event.keyCode == 53 { // Escape
                 self?.dismiss()
@@ -122,6 +123,12 @@ final class CommandPalette: NSObject {
                 return nil
             }
             return event
+        }
+    }
+
+    deinit {
+        if let monitor = keyboardMonitor {
+            NSEvent.removeMonitor(monitor)
         }
     }
 
