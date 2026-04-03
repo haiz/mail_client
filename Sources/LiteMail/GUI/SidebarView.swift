@@ -1,11 +1,11 @@
 import AppKit
 
-/// Sidebar with account switcher dropdown at top, folder list below.
+/// Sidebar with account switcher at top, folder list below.
 /// One account active at a time.
 final class SidebarView: NSObject {
 
     let view: NSView
-    private let accountPicker: NSPopUpButton
+    private let accountSwitcher: AccountSwitcherView
     private let composeButton: NSButton
     private let refreshButton: NSButton
     private let scrollView: NSScrollView
@@ -25,10 +25,9 @@ final class SidebarView: NSObject {
     private var mailboxes: [SidebarItem] = []
 
     override init() {
-        // Account picker dropdown
-        accountPicker = NSPopUpButton()
-        accountPicker.font = .systemFont(ofSize: 12, weight: .medium)
-        accountPicker.translatesAutoresizingMaskIntoConstraints = false
+        // Custom account switcher card
+        accountSwitcher = AccountSwitcherView()
+        accountSwitcher.translatesAutoresizingMaskIntoConstraints = false
 
         // Outline view
         outlineView = NSOutlineView()
@@ -51,35 +50,60 @@ final class SidebarView: NSObject {
         scrollView.translatesAutoresizingMaskIntoConstraints = false
 
         // Action buttons
-        composeButton = NSButton(image: NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: "Compose")!, target: nil, action: nil)
+        composeButton = CursorButton(
+            image: NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: "Compose")!,
+            target: nil, action: nil
+        )
         composeButton.bezelStyle = .accessoryBarAction
         composeButton.isBordered = false
         composeButton.toolTip = "New Message (\u{2318}N)"
+        composeButton.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 14, weight: .regular)
+        composeButton.contentTintColor = .secondaryLabelColor
 
-        refreshButton = NSButton(image: NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "Refresh")!, target: nil, action: nil)
+        refreshButton = CursorButton(
+            image: NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "Refresh")!,
+            target: nil, action: nil
+        )
         refreshButton.bezelStyle = .accessoryBarAction
         refreshButton.isBordered = false
         refreshButton.toolTip = "Sync (\u{2318}\u{21E7}R)"
+        refreshButton.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
+        refreshButton.contentTintColor = .secondaryLabelColor
 
         let actionBar = NSStackView(views: [composeButton, refreshButton])
-        actionBar.spacing = 2
+        actionBar.spacing = 8
+        actionBar.edgeInsets = NSEdgeInsets(top: 0, left: 8, bottom: 0, right: 8)
+        actionBar.distribution = .fillEqually
         actionBar.translatesAutoresizingMaskIntoConstraints = false
 
-        // Container: picker on top, action bar, folder list below
+        // Container: account switcher on top, separator, action toolbar, folder list below
         let container = NSView()
-        container.addSubview(accountPicker)
-        container.addSubview(actionBar)
+        container.addSubview(accountSwitcher)
         container.addSubview(scrollView)
 
+        let separator = NSBox()
+        separator.boxType = .separator
+        separator.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(separator)
+
+        container.addSubview(actionBar)
+
         NSLayoutConstraint.activate([
-            accountPicker.topAnchor.constraint(equalTo: container.topAnchor, constant: 8),
-            accountPicker.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
-            accountPicker.trailingAnchor.constraint(equalTo: actionBar.leadingAnchor, constant: -4),
+            accountSwitcher.topAnchor.constraint(equalTo: container.topAnchor, constant: 6),
+            accountSwitcher.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 6),
+            accountSwitcher.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -6),
+            accountSwitcher.heightAnchor.constraint(equalToConstant: 52),
 
-            actionBar.centerYAnchor.constraint(equalTo: accountPicker.centerYAnchor),
-            actionBar.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
+            separator.topAnchor.constraint(equalTo: accountSwitcher.bottomAnchor, constant: 6),
+            separator.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            separator.trailingAnchor.constraint(equalTo: container.trailingAnchor),
 
-            scrollView.topAnchor.constraint(equalTo: accountPicker.bottomAnchor, constant: 6),
+            actionBar.topAnchor.constraint(equalTo: separator.bottomAnchor, constant: 2),
+            actionBar.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            actionBar.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            actionBar.heightAnchor.constraint(equalToConstant: 32),
+
+            scrollView.topAnchor.constraint(equalTo: actionBar.bottomAnchor, constant: 2),
             scrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             scrollView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
@@ -91,62 +115,79 @@ final class SidebarView: NSObject {
 
         outlineView.dataSource = self
         outlineView.delegate = self
-        accountPicker.target = self
-        accountPicker.action = #selector(accountPickerChanged)
         composeButton.target = self
         composeButton.action = #selector(composeClicked)
         refreshButton.target = self
         refreshButton.action = #selector(refreshClicked)
+
+        accountSwitcher.onTap = { [weak self] in
+            self?.showAccountMenu()
+        }
 
         loadDefaultMailboxes()
     }
 
     // MARK: - Public API
 
-    /// Sets available accounts in the dropdown. Selects the given accountId.
+    /// Sets available accounts. Selects the given accountId.
     func setAccounts(_ accountList: [(id: String, email: String)], activeId: String?) {
         accounts = accountList
-        accountPicker.removeAllItems()
-
-        for account in accountList {
-            accountPicker.addItem(withTitle: account.email)
-            accountPicker.lastItem?.representedObject = account.id
-        }
-
-        // Always show — even with 1 account, user needs to see which account is active
-        accountPicker.isHidden = false
-
-        if let activeId, let index = accountList.firstIndex(where: { $0.id == activeId }) {
-            accountPicker.selectItem(at: index)
-        }
         currentAccountId = activeId ?? accountList.first?.id
+
+        let displayAccount = accountList.first(where: { $0.id == currentAccountId }) ?? accountList.first
+        if let account = displayAccount {
+            accountSwitcher.configure(email: account.email)
+        }
     }
 
     /// Updates the folder list for the current account.
     func updateFolders(_ folders: [MailFolder]) {
-        let section = SidebarItem(title: "Mailboxes", icon: nil, folderId: nil, children: folders.map { folder in
-            let icon = Self.iconForFolder(folder.id)
-            return SidebarItem(title: folder.name, icon: icon, folderId: folder.id, unreadCount: folder.unreadCount, accountId: currentAccountId)
-        })
-        mailboxes = [section]
+        mailboxes = folders.map { folder in
+            SidebarItem(
+                title: folder.name,
+                icon: Self.iconForFolder(folder.id),
+                folderId: folder.id,
+                unreadCount: folder.unreadCount,
+                accountId: currentAccountId
+            )
+        }
         outlineView.reloadData()
-        outlineView.expandItem(nil, expandChildren: true)
 
         if let inboxRow = findRow(folderId: "INBOX") {
             outlineView.selectRowIndexes(IndexSet(integer: inboxRow), byExtendingSelection: false)
         }
     }
 
-    // MARK: - Account Picker
+    // MARK: - Account Menu
+
+    private func showAccountMenu() {
+        guard !accounts.isEmpty else { return }
+        let menu = NSMenu()
+        for account in accounts {
+            let item = NSMenuItem(
+                title: account.email,
+                action: #selector(accountMenuItemSelected(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = account.id
+            if account.id == currentAccountId { item.state = .on }
+            menu.addItem(item)
+        }
+        // Drop down below the switcher
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: 0), in: accountSwitcher)
+    }
+
+    @objc private func accountMenuItemSelected(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String,
+              let account = accounts.first(where: { $0.id == id }) else { return }
+        currentAccountId = id
+        accountSwitcher.configure(email: account.email)
+        onAccountSwitched?(id)
+    }
 
     @objc private func composeClicked() { onCompose?() }
     @objc private func refreshClicked() { onRefresh?() }
-
-    @objc private func accountPickerChanged() {
-        guard let selectedId = accountPicker.selectedItem?.representedObject as? String else { return }
-        currentAccountId = selectedId
-        onAccountSwitched?(selectedId)
-    }
 
     // MARK: - Defaults
 
@@ -158,13 +199,8 @@ final class SidebarView: NSObject {
             ("Drafts", "doc.text.fill", "[Gmail]/Drafts"),
             ("Trash", "trash.fill", "[Gmail]/Trash"),
         ]
-
-        let children = defaults.map { (title, icon, folderId) in
-            SidebarItem(title: title, icon: icon, folderId: folderId)
-        }
-        mailboxes = [SidebarItem(title: "Mailboxes", icon: nil, folderId: nil, children: children)]
+        mailboxes = defaults.map { SidebarItem(title: $0.0, icon: $0.1, folderId: $0.2) }
         outlineView.reloadData()
-        outlineView.expandItem(nil, expandChildren: true)
     }
 
     private func findRow(folderId: String) -> Int? {
@@ -193,20 +229,15 @@ final class SidebarView: NSObject {
 
 extension SidebarView: NSOutlineViewDataSource {
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
-        if item == nil { return mailboxes.count }
-        guard let section = item as? SidebarItem else { return 0 }
-        return section.children?.count ?? 0
+        item == nil ? mailboxes.count : 0
     }
 
     func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
-        if item == nil { return mailboxes[index] }
-        guard let section = item as? SidebarItem else { return SidebarItem(title: "") }
-        return section.children?[index] ?? SidebarItem(title: "")
+        mailboxes[index]
     }
 
     func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
-        guard let sidebarItem = item as? SidebarItem else { return false }
-        return sidebarItem.children != nil
+        false
     }
 }
 
@@ -261,12 +292,8 @@ extension SidebarView: NSOutlineViewDelegate {
         }
 
         cell.textField?.stringValue = sidebarItem.title
-        cell.textField?.font = sidebarItem.children != nil
-            ? .systemFont(ofSize: 11, weight: .semibold)
-            : .systemFont(ofSize: 13)
-        cell.textField?.textColor = sidebarItem.children != nil
-            ? .secondaryLabelColor
-            : .labelColor
+        cell.textField?.font = .systemFont(ofSize: 13)
+        cell.textField?.textColor = .labelColor
 
         if let iconName = sidebarItem.icon {
             cell.imageView?.image = NSImage(systemSymbolName: iconName, accessibilityDescription: nil)
@@ -287,11 +314,6 @@ extension SidebarView: NSOutlineViewDelegate {
         return cell
     }
 
-    func outlineView(_ outlineView: NSOutlineView, isGroupItem item: Any) -> Bool {
-        guard let sidebarItem = item as? SidebarItem else { return false }
-        return sidebarItem.children != nil
-    }
-
     func outlineViewSelectionDidChange(_ notification: Notification) {
         let row = outlineView.selectedRow
         guard row >= 0, let item = outlineView.item(atRow: row) as? SidebarItem,
@@ -301,22 +323,240 @@ extension SidebarView: NSOutlineViewDelegate {
     }
 }
 
-// MARK: - Model
+// MARK: - Account Switcher Card
+
+/// Identity Card account switcher: 36px colored avatar, initials, display name + email two-line,
+/// chevron.up.chevron.down picker affordance.
+///
+/// Rendering strategy: the card background uses wantsUpdateLayer so layer colors are captured
+/// by cacheDisplay(). Text subviews live in a plain (non-wantsUpdateLayer) layer container so
+/// NSTextField text renders normally in both live display and screenshot capture.
+private final class AccountSwitcherView: NSView {
+
+    var onTap: (() -> Void)?
+
+    // Layer-backed containers (captured via layer compositing in cacheDisplay)
+    private let avatarCircle = NSView()
+    // Avatar text inside its own non-wantsUpdateLayer container — text renders correctly
+    private let avatarLabel = NSTextField(labelWithString: "")
+    // Text stack in a plain layer container so NSTextField renders correctly
+    private let textContainer = NSView()
+    private let nameLabel = NSTextField(labelWithString: "")
+    private let emailLabel = NSTextField(labelWithString: "")
+    private let chevron: NSImageView
+
+    private var avatarColor: NSColor = .controlAccentColor
+    private var isHovered = false
+    private var isPressed = false
+
+    private static let avatarColors: [NSColor] = [
+        NSColor(red: 0.35, green: 0.56, blue: 0.97, alpha: 1), // Blue
+        NSColor(red: 0.94, green: 0.42, blue: 0.42, alpha: 1), // Red
+        NSColor(red: 0.26, green: 0.76, blue: 0.53, alpha: 1), // Green
+        NSColor(red: 0.96, green: 0.65, blue: 0.14, alpha: 1), // Orange
+        NSColor(red: 0.67, green: 0.44, blue: 0.86, alpha: 1), // Purple
+        NSColor(red: 0.87, green: 0.36, blue: 0.58, alpha: 1), // Pink
+        NSColor(red: 0.27, green: 0.71, blue: 0.73, alpha: 1), // Teal
+    ]
+
+    override init(frame frameRect: NSRect) {
+        chevron = NSImageView(
+            image: NSImage(systemSymbolName: "chevron.up.chevron.down", accessibilityDescription: nil) ?? NSImage()
+        )
+        super.init(frame: frameRect)
+        setup()
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    private func setup() {
+        wantsLayer = true
+        layer?.cornerRadius = 8
+
+        // 36px avatar circle
+        avatarCircle.wantsLayer = true
+        avatarCircle.layer?.cornerRadius = 18
+        avatarCircle.translatesAutoresizingMaskIntoConstraints = false
+
+        // Avatar initials: inside avatarCircle (not wantsUpdateLayer → text renders)
+        avatarLabel.font = .systemFont(ofSize: 12, weight: .semibold)
+        avatarLabel.textColor = .white
+        avatarLabel.alignment = .center
+        avatarLabel.drawsBackground = false
+        avatarLabel.isBordered = false
+        avatarLabel.isEditable = false
+        avatarLabel.translatesAutoresizingMaskIntoConstraints = false
+        avatarCircle.addSubview(avatarLabel)
+        NSLayoutConstraint.activate([
+            avatarLabel.centerXAnchor.constraint(equalTo: avatarCircle.centerXAnchor),
+            avatarLabel.centerYAnchor.constraint(equalTo: avatarCircle.centerYAnchor),
+        ])
+
+        // Text container: plain NSView (no wantsLayer) inside the wantsUpdateLayer parent.
+        // NSTextField text rendering works via the normal draw path in this configuration.
+        textContainer.translatesAutoresizingMaskIntoConstraints = false
+
+        // Display name: 13pt semibold, primary label
+        nameLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        nameLabel.textColor = .labelColor
+        nameLabel.lineBreakMode = .byTruncatingTail
+        nameLabel.drawsBackground = false
+        nameLabel.isBordered = false
+        nameLabel.isEditable = false
+        nameLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        // Email address: 11pt regular, secondary
+        emailLabel.font = .systemFont(ofSize: 11, weight: .regular)
+        emailLabel.textColor = .secondaryLabelColor
+        emailLabel.lineBreakMode = .byTruncatingTail
+        emailLabel.drawsBackground = false
+        emailLabel.isBordered = false
+        emailLabel.isEditable = false
+        emailLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        textContainer.addSubview(nameLabel)
+        textContainer.addSubview(emailLabel)
+        NSLayoutConstraint.activate([
+            nameLabel.leadingAnchor.constraint(equalTo: textContainer.leadingAnchor),
+            nameLabel.trailingAnchor.constraint(equalTo: textContainer.trailingAnchor),
+            nameLabel.bottomAnchor.constraint(equalTo: textContainer.centerYAnchor, constant: -1),
+
+            emailLabel.leadingAnchor.constraint(equalTo: textContainer.leadingAnchor),
+            emailLabel.trailingAnchor.constraint(equalTo: textContainer.trailingAnchor),
+            emailLabel.topAnchor.constraint(equalTo: textContainer.centerYAnchor, constant: 1),
+        ])
+
+        // Picker chevron
+        chevron.contentTintColor = .tertiaryLabelColor
+        chevron.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 9, weight: .semibold)
+        chevron.translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(avatarCircle)
+        addSubview(textContainer)
+        addSubview(chevron)
+
+        NSLayoutConstraint.activate([
+            // Avatar: 36×36, 10px from left, vertically centered
+            avatarCircle.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            avatarCircle.centerYAnchor.constraint(equalTo: centerYAnchor),
+            avatarCircle.widthAnchor.constraint(equalToConstant: 36),
+            avatarCircle.heightAnchor.constraint(equalToConstant: 36),
+
+            // Chevron: 8px from right, vertically centered
+            chevron.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            chevron.centerYAnchor.constraint(equalTo: centerYAnchor),
+            chevron.widthAnchor.constraint(equalToConstant: 11),
+            chevron.heightAnchor.constraint(equalToConstant: 16),
+
+            // Text container: fills space between avatar and chevron, full height
+            textContainer.leadingAnchor.constraint(equalTo: avatarCircle.trailingAnchor, constant: 10),
+            textContainer.trailingAnchor.constraint(equalTo: chevron.leadingAnchor, constant: -4),
+            textContainer.topAnchor.constraint(equalTo: topAnchor),
+            textContainer.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+    }
+
+    override func updateLayer() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            let bg: NSColor
+            if isPressed {
+                bg = .labelColor.withAlphaComponent(0.13)
+            } else if isHovered {
+                bg = .labelColor.withAlphaComponent(0.07)
+            } else {
+                bg = .controlColor
+            }
+            layer?.backgroundColor = bg.cgColor
+        }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
+
+    /// Updates the displayed account.
+    func configure(email: String) {
+        emailLabel.stringValue = email
+
+        // Derive a readable display name from the local part
+        let localPart = email.components(separatedBy: "@").first ?? email
+        let words = localPart.replacingOccurrences(of: ".", with: " ")
+            .split(separator: " ")
+            .map { $0.prefix(1).uppercased() + $0.dropFirst().lowercased() }
+        nameLabel.stringValue = words.isEmpty ? email : words.joined(separator: " ")
+
+        // Initials from name words (e.g. "John Doe" → "JD", "Hai" → "H")
+        if words.count >= 2 {
+            avatarLabel.stringValue = words.prefix(2).map { String($0.prefix(1)) }.joined()
+        } else {
+            avatarLabel.stringValue = String((words.first ?? email).prefix(1)).uppercased()
+        }
+
+        avatarColor = Self.avatarColors[abs(email.hashValue) % Self.avatarColors.count]
+        avatarCircle.layer?.backgroundColor = avatarColor.cgColor
+        needsDisplay = true
+    }
+
+    // MARK: - Hover & Click
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for area in trackingAreas { removeTrackingArea(area) }
+        addTrackingArea(NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeAlways],
+            owner: self,
+            userInfo: nil
+        ))
+    }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovered = true
+        needsDisplay = true
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+        isPressed = false
+        needsDisplay = true
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        isPressed = true
+        needsDisplay = true
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        isPressed = false
+        let inside = bounds.contains(convert(event.locationInWindow, from: nil))
+        isHovered = inside
+        needsDisplay = true
+        if inside { onTap?() }
+    }
+}
+
+// MARK: - Sidebar Model
 
 private class SidebarItem {
     let title: String
     let icon: String?
     let folderId: String?
     var unreadCount: Int?
-    var children: [SidebarItem]?
     var accountId: String?
 
-    init(title: String, icon: String? = nil, folderId: String? = nil, unreadCount: Int? = nil, children: [SidebarItem]? = nil, accountId: String? = nil) {
+    init(title: String, icon: String? = nil, folderId: String? = nil, unreadCount: Int? = nil,
+         accountId: String? = nil) {
         self.title = title
         self.icon = icon
         self.folderId = folderId
         self.unreadCount = unreadCount
-        self.children = children
         self.accountId = accountId
     }
 }
