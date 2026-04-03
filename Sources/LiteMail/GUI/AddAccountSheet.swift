@@ -52,11 +52,11 @@ final class AddAccountSheet: NSObject {
         progressIndicator.isHidden = true
         progressIndicator.controlSize = .small
 
-        addButton = NSButton(title: "Add Account", target: nil, action: nil)
+        addButton = CursorButton(title: "Add Account", target: nil, action: nil)
         addButton.bezelStyle = .rounded
         addButton.keyEquivalent = "\r"
 
-        cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
+        cancelButton = CursorButton(title: "Cancel", target: nil, action: nil)
         cancelButton.bezelStyle = .rounded
         cancelButton.keyEquivalent = "\u{1b}"
 

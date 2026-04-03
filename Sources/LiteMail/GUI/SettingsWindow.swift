@@ -59,10 +59,10 @@ final class SettingsWindow: NSObject {
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         scrollView.heightAnchor.constraint(equalToConstant: 140).isActive = true
 
-        let addButton = NSButton(title: "Add Account...", target: self, action: #selector(addClicked))
+        let addButton = CursorButton(title: "Add Account...", target: self, action: #selector(addClicked))
         addButton.bezelStyle = .rounded
 
-        let removeButton = NSButton(title: "Remove", target: self, action: #selector(removeClicked))
+        let removeButton = CursorButton(title: "Remove", target: self, action: #selector(removeClicked))
         removeButton.bezelStyle = .rounded
 
         let accountButtons = NSStackView(views: [addButton, removeButton])
@@ -73,7 +73,7 @@ final class SettingsWindow: NSObject {
         let countLabel = NSTextField(labelWithString: "Total emails: \(emailCount)")
         countLabel.font = .systemFont(ofSize: 13)
 
-        let syncButton = NSButton(title: "Sync All", target: self, action: #selector(syncClicked))
+        let syncButton = CursorButton(title: "Sync All", target: self, action: #selector(syncClicked))
         syncButton.bezelStyle = .rounded
 
         // Signature section
@@ -86,7 +86,7 @@ final class SettingsWindow: NSObject {
         sigField.translatesAutoresizingMaskIntoConstraints = false
         sigField.widthAnchor.constraint(equalToConstant: 400).isActive = true
 
-        let saveSigButton = NSButton(title: "Save Signature", target: self, action: #selector(saveSignature))
+        let saveSigButton = CursorButton(title: "Save Signature", target: self, action: #selector(saveSignature))
         saveSigButton.bezelStyle = .rounded
         self.signatureField = sigField
 
