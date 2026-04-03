@@ -37,7 +37,7 @@ final class MainWindowController: NSObject {
         window.toolbarStyle = .unified
 
         // Split view
-        splitView = NSSplitView()
+        splitView = CursorSplitView()
         splitView.isVertical = true
         splitView.dividerStyle = .thin
 
@@ -99,7 +99,11 @@ final class MainWindowController: NSObject {
 
     func show() {
         window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        if #available(macOS 14, *) {
+            NSApp.activate()
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+        }
 
         // Set initial divider positions after layout
         DispatchQueue.main.async { [self] in
