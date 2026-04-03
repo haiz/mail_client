@@ -65,10 +65,10 @@ final class DetailView: NSObject {
         avatarCircle.layer?.cornerRadius = 20
 
         // Action buttons with SF Symbols
-        replyButton = NSButton(image: NSImage(systemSymbolName: "arrowshape.turn.up.left.fill", accessibilityDescription: "Reply")!, target: nil, action: nil)
-        forwardButton = NSButton(image: NSImage(systemSymbolName: "arrowshape.turn.up.right.fill", accessibilityDescription: "Forward")!, target: nil, action: nil)
-        archiveButton = NSButton(image: NSImage(systemSymbolName: "archivebox.fill", accessibilityDescription: "Archive")!, target: nil, action: nil)
-        deleteButton = NSButton(image: NSImage(systemSymbolName: "trash.fill", accessibilityDescription: "Delete")!, target: nil, action: nil)
+        replyButton = CursorButton(image: NSImage(systemSymbolName: "arrowshape.turn.up.left.fill", accessibilityDescription: "Reply")!, target: nil, action: nil)
+        forwardButton = CursorButton(image: NSImage(systemSymbolName: "arrowshape.turn.up.right.fill", accessibilityDescription: "Forward")!, target: nil, action: nil)
+        archiveButton = CursorButton(image: NSImage(systemSymbolName: "archivebox.fill", accessibilityDescription: "Archive")!, target: nil, action: nil)
+        deleteButton = CursorButton(image: NSImage(systemSymbolName: "trash.fill", accessibilityDescription: "Delete")!, target: nil, action: nil)
 
         for btn in [replyButton, forwardButton, archiveButton, deleteButton] {
             btn.bezelStyle = .accessoryBarAction
@@ -78,7 +78,7 @@ final class DetailView: NSObject {
             btn.heightAnchor.constraint(equalToConstant: 28).isActive = true
         }
 
-        viewSourceButton = NSButton(image: NSImage(systemSymbolName: "doc.text.magnifyingglass", accessibilityDescription: "View Source")!, target: nil, action: nil)
+        viewSourceButton = CursorButton(image: NSImage(systemSymbolName: "doc.text.magnifyingglass", accessibilityDescription: "View Source")!, target: nil, action: nil)
         viewSourceButton.bezelStyle = .accessoryBarAction
         viewSourceButton.isBordered = false
         viewSourceButton.contentTintColor = .labelColor
@@ -89,7 +89,7 @@ final class DetailView: NSObject {
         actionBar.spacing = 4
 
         // Body
-        bodyTextView = NSTextView()
+        bodyTextView = LinkCursorTextView()
         bodyTextView.isEditable = false
         bodyTextView.isSelectable = true
         bodyTextView.isRichText = true
@@ -347,13 +347,14 @@ final class DetailView: NSObject {
         </style></head><body>\(html)</body></html>
         """
 
+        webView?.stopLoading()
         webView?.loadHTMLString(styledHTML, baseURL: nil)
         webView?.isHidden = false
     }
 
     private func hideWebView() {
+        webView?.stopLoading()
         webView?.isHidden = true
-        webView?.loadHTMLString("", baseURL: nil)
     }
 
     // MARK: - View Source
