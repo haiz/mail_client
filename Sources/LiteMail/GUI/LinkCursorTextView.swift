@@ -6,17 +6,19 @@ import AppKit
 /// This subclass adds a cursorUpdate tracking area and checks the .link
 /// attribute at the mouse position to set the cursor manually.
 final class LinkCursorTextView: NSTextView {
+    private var linkTrackingArea: NSTrackingArea?
+
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        for area in trackingAreas where area.owner === self {
-            removeTrackingArea(area)
-        }
-        addTrackingArea(NSTrackingArea(
+        if let old = linkTrackingArea { removeTrackingArea(old) }
+        let area = NSTrackingArea(
             rect: .zero,
             options: [.cursorUpdate, .activeInKeyWindow, .inVisibleRect],
             owner: self,
             userInfo: nil
-        ))
+        )
+        addTrackingArea(area)
+        linkTrackingArea = area
     }
 
     override func cursorUpdate(with event: NSEvent) {
@@ -33,7 +35,13 @@ final class LinkCursorTextView: NSTextView {
             x: point.x - textContainerInset.width,
             y: point.y - textContainerInset.height
         )
-        let glyphIndex = layout.glyphIndex(for: adjusted, in: container)
+        var fraction: CGFloat = 0
+        let glyphIndex = layout.glyphIndex(for: adjusted, in: container, fractionOfDistanceThroughGlyph: &fraction)
+        // fraction >= 1.0 means the point is past the glyph (trailing whitespace/beyond text)
+        guard fraction < 1.0 else {
+            super.cursorUpdate(with: event)
+            return
+        }
         let charIndex = layout.characterIndexForGlyph(at: glyphIndex)
         guard charIndex < storage.length else {
             super.cursorUpdate(with: event)
