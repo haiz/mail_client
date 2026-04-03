@@ -66,7 +66,7 @@ final class ComposerWindow: NSObject {
         bodyScrollView.autohidesScrollers = true
 
         // Send button
-        sendButton = NSButton(title: "Send", target: nil, action: nil)
+        sendButton = CursorButton(title: "Send", target: nil, action: nil)
         sendButton.bezelStyle = .rounded
         sendButton.controlSize = .large
         sendButton.keyEquivalent = "\r"
@@ -139,15 +139,15 @@ final class ComposerWindow: NSObject {
         toolbar.addSubview(sendButton)
 
         // Formatting toolbar
-        let boldBtn = NSButton(title: "B", target: self, action: #selector(toggleBold))
+        let boldBtn = CursorButton(title: "B", target: self, action: #selector(toggleBold))
         boldBtn.font = .boldSystemFont(ofSize: 13)
         boldBtn.bezelStyle = .accessoryBarAction
-        let italicBtn = NSButton(title: "I", target: self, action: #selector(toggleItalic))
+        let italicBtn = CursorButton(title: "I", target: self, action: #selector(toggleItalic))
         italicBtn.font = NSFontManager.shared.convert(.systemFont(ofSize: 13), toHaveTrait: .italicFontMask)
         italicBtn.bezelStyle = .accessoryBarAction
-        let underlineBtn = NSButton(title: "U", target: self, action: #selector(toggleUnderline))
+        let underlineBtn = CursorButton(title: "U", target: self, action: #selector(toggleUnderline))
         underlineBtn.bezelStyle = .accessoryBarAction
-        let linkBtn = NSButton(image: NSImage(systemSymbolName: "link", accessibilityDescription: "Insert Link")!, target: self, action: #selector(insertLink))
+        let linkBtn = CursorButton(image: NSImage(systemSymbolName: "link", accessibilityDescription: "Insert Link")!, target: self, action: #selector(insertLink))
         linkBtn.bezelStyle = .accessoryBarAction
 
         let formatBar = NSStackView(views: [boldBtn, italicBtn, underlineBtn, linkBtn])
