@@ -404,7 +404,11 @@ actor IMAPProvider: MailProvider {
         case "[Gmail]/Trash": return "Trash"
         case "[Gmail]/Starred": return "Starred"
         case "[Gmail]/All Mail": return "All Mail"
-        default: return decodeModifiedUTF7(folder)
+        default:
+            // Decode Modified UTF-7, then show only the leaf label name.
+            // "Cá nhân/ACE" → "ACE" (the parent "Cá nhân" is a separate folder entry)
+            let decoded = decodeModifiedUTF7(folder)
+            return decoded.split(separator: "/").last.map(String.init) ?? decoded
         }
     }
 
