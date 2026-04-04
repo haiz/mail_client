@@ -44,7 +44,9 @@ actor IMAPProvider: MailProvider {
             let token = try await authManager.oauthAccessToken(accountId: accountId)
             try await server.authenticateXOAUTH2(email: emailAddress, accessToken: token)
         case .password:
-            let password = authManager.getPassword(accountId: accountId) ?? ""
+            guard let password = authManager.getPassword(accountId: accountId), !password.isEmpty else {
+                throw IMAPProviderError.noCredentials
+            }
             // Try AUTHENTICATE PLAIN first (required by Stalwart, Dovecot, etc.)
             // Fall back to LOGIN if PLAIN is not supported
             do {
@@ -84,8 +86,8 @@ actor IMAPProvider: MailProvider {
         let imap = try await getIMAP()
         let folders = try await listFolders()
 
-        for folder in folders {
-            try await syncFolder(imap: imap, folderId: folder.id, recentBodyCount: 500)
+        for folder in folders where !Self.isSkippedFolder(folder.id) {
+            try await syncFolder(imap: imap, folderId: folder.id)
         }
     }
 
@@ -93,12 +95,23 @@ actor IMAPProvider: MailProvider {
         let imap = try await getIMAP()
         let folders = try await listFolders()
 
-        for folder in folders {
+        for folder in folders where !Self.isSkippedFolder(folder.id) {
             try await incrementalSyncFolder(imap: imap, folderId: folder.id)
         }
     }
 
-    private func syncFolder(imap: IMAPServer, folderId: String, recentBodyCount: Int) async throws {
+    /// Returns true for Gmail virtual folders that duplicate emails found in real folders.
+    /// Syncing them would store the same messages twice under different folder names.
+    private static func isSkippedFolder(_ folderId: String) -> Bool {
+        let skipped: Set<String> = [
+            "[Gmail]/All Mail",
+            "[Gmail]/Important",
+            "[Gmail]/Starred",   // also appears in INBOX with \Flagged
+        ]
+        return skipped.contains(folderId)
+    }
+
+    private func syncFolder(imap: IMAPServer, folderId: String) async throws {
         let selection = try await imap.selectMailbox(folderId)
         let messageCount = selection.messageCount
         guard messageCount > 0 else { return }
@@ -112,10 +125,9 @@ actor IMAPProvider: MailProvider {
             _ = try? await store.insertEmail(record)
         }
 
-        let recentHeaders = headers.suffix(recentBodyCount)
-        for info in recentHeaders {
-            await fetchAndStoreBody(imap: imap, info: info)
-        }
+        // Bodies are fetched on-demand when the user opens a message (fetchMessageBody).
+        // Pre-fetching here is skipped: sequence-range fetches don't include UIDs,
+        // causing FetchStructureCommand<UID> to fail on Gmail.
 
         let lastUid: Int? = headers.last?.uid.map { Int($0.value) }
         let syncState = SyncStateRecord(
@@ -131,7 +143,7 @@ actor IMAPProvider: MailProvider {
     private func incrementalSyncFolder(imap: IMAPServer, folderId: String) async throws {
         guard let syncState = try await store.getSyncState(accountId: accountId, folder: folderId),
               let lastUid = syncState.lastUid else {
-            try await syncFolder(imap: imap, folderId: folderId, recentBodyCount: 100)
+            try await syncFolder(imap: imap, folderId: folderId)
             return
         }
 
@@ -139,7 +151,7 @@ actor IMAPProvider: MailProvider {
 
         if let storedValidity = syncState.uidValidity,
            storedValidity != Int(selection.uidValidity.value) {
-            try await syncFolder(imap: imap, folderId: folderId, recentBodyCount: 100)
+            try await syncFolder(imap: imap, folderId: folderId)
             return
         }
 
@@ -400,4 +412,5 @@ actor IMAPProvider: MailProvider {
 enum IMAPProviderError: Error {
     case notConnected
     case messageNotFound
+    case noCredentials
 }
