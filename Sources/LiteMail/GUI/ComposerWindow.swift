@@ -15,6 +15,17 @@ final class ComposerWindow: NSObject {
     private var autoSaveTimer: Timer?
     private var draftId: Int64?
 
+    /// Injected by AppDelegate for contact autocomplete.
+    var contactsStore: ContactsStore?
+    var accountId: String?
+
+    /// Contacts preloaded from cache for autocomplete filtering.
+    private var cachedContacts: [ContactRecord] = []
+
+    /// State for suggestion menu.
+    private var pendingSuggestions: [ContactRecord] = []
+    private weak var suggestionField: NSTextField?
+
     /// Called when the user clicks Send. Receives the composed message.
     var onSend: ((OutgoingMessage) -> Void)?
     /// Called periodically for draft auto-save.
@@ -76,6 +87,9 @@ final class ComposerWindow: NSObject {
 
         super.init()
 
+        toField.delegate = self
+        ccField.delegate = self
+
         sendButton.target = self
         sendButton.action = #selector(sendClicked)
 
@@ -86,11 +100,75 @@ final class ComposerWindow: NSObject {
 
     func show() {
         window.makeKeyAndOrderFront(nil)
+        preloadContacts()
     }
 
     func close() {
         autoSaveTimer?.invalidate()
         window.close()
+    }
+
+    // MARK: - Contact preload
+
+    private func preloadContacts() {
+        guard let contactsStore, let accountId else { return }
+        Task { @MainActor in
+            self.cachedContacts = (try? await contactsStore.allCachedContacts(accountId: accountId)) ?? []
+        }
+    }
+
+    // MARK: - Autocomplete
+
+    /// Extracts the last comma-separated token from a recipient field string.
+    private func currentToken(in text: String) -> String {
+        let parts = text.components(separatedBy: ",")
+        return parts.last?.trimmingCharacters(in: .whitespaces) ?? ""
+    }
+
+    /// Inserts a selected contact into the recipient field, replacing the last token.
+    private func insertContact(_ contact: ContactRecord, into field: NSTextField) {
+        let entry: String
+        if let name = contact.name, !name.isEmpty {
+            entry = "\(name) <\(contact.email)>"
+        } else {
+            entry = contact.email
+        }
+
+        let existing = field.stringValue
+        let parts = existing.components(separatedBy: ",")
+        if parts.count > 1 {
+            field.stringValue = parts.dropLast().joined(separator: ",") + ", " + entry + ", "
+        } else {
+            field.stringValue = entry + ", "
+        }
+    }
+
+    private func showSuggestions(_ contacts: [ContactRecord], for field: NSTextField) {
+        pendingSuggestions = contacts
+        suggestionField = field
+
+        let menu = NSMenu()
+        for (index, contact) in contacts.enumerated() {
+            let title: String
+            if let name = contact.name, !name.isEmpty {
+                title = "\(name) <\(contact.email)>"
+            } else {
+                title = contact.email
+            }
+            let item = NSMenuItem(title: title, action: #selector(suggestionSelected(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = index
+            menu.addItem(item)
+        }
+
+        menu.popUp(positioning: menu.items.first, at: NSPoint(x: 0, y: -2), in: field)
+    }
+
+    @objc private func suggestionSelected(_ sender: NSMenuItem) {
+        let index = sender.tag
+        guard index >= 0, index < pendingSuggestions.count,
+              let field = suggestionField else { return }
+        insertContact(pendingSuggestions[index], into: field)
     }
 
     // MARK: - Layout
@@ -356,4 +434,25 @@ final class ComposerWindow: NSObject {
         f.timeStyle = .short
         return f
     }()
+}
+
+// MARK: - NSTextFieldDelegate (contacts autocomplete)
+
+extension ComposerWindow: NSTextFieldDelegate {
+    func controlTextDidChange(_ obj: Notification) {
+        guard let field = obj.object as? NSTextField,
+              (field === toField || field === ccField) else { return }
+
+        let token = currentToken(in: field.stringValue)
+        guard token.count >= 2 else { return }
+
+        let lowToken = token.lowercased()
+        let matches = cachedContacts.filter { contact in
+            contact.email.lowercased().hasPrefix(lowToken) ||
+            (contact.name?.lowercased().hasPrefix(lowToken) ?? false)
+        }.prefix(8)
+
+        guard !matches.isEmpty else { return }
+        showSuggestions(Array(matches), for: field)
+    }
 }

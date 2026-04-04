@@ -253,6 +253,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func openComposer(mode: ComposerWindow.Mode) {
         let composer = ComposerWindow(mode: mode)
+        composer.contactsStore = contactsStore
+        composer.accountId = currentAccountId
         composer.onSend = { [weak self] message in
             guard let self, let accountId = self.currentAccountId else { return }
             self.composerWindow = nil  // Release after send
