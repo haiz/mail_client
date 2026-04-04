@@ -13,7 +13,7 @@ enum GoogleConfig {
     }
 
     /// The bundled client ID. Replace with the value from Google Cloud Console.
-    static let bundledClientId = "137028004144-raesbnkhocffua4frql98j8nt5516l1m.apps.googleusercontent.com"
+    static let bundledClientId = "137028004144-gvdnsjaol7amgjv5jd4plb1dqdc3t1o4.apps.googleusercontent.com"
 
     static let authorizationEndpoint = URL(string: "https://accounts.google.com/o/oauth2/v2/auth")!
     static let tokenEndpoint = URL(string: "https://oauth2.googleapis.com/token")!
