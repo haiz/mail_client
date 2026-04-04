@@ -404,8 +404,43 @@ actor IMAPProvider: MailProvider {
         case "[Gmail]/Trash": return "Trash"
         case "[Gmail]/Starred": return "Starred"
         case "[Gmail]/All Mail": return "All Mail"
-        default: return folder
+        default: return decodeModifiedUTF7(folder)
         }
+    }
+
+    /// Decodes IMAP Modified UTF-7 folder names (RFC 3501 §5.1.3).
+    /// Non-ASCII characters are encoded as &<base64>- sequences.
+    /// E.g. "Ca&AwE- nh&AOI-n/ACE" → "Các nhãn/ACE"
+    private static func decodeModifiedUTF7(_ input: String) -> String {
+        var result = ""
+        var i = input.startIndex
+        while i < input.endIndex {
+            if input[i] == "&" {
+                let start = input.index(after: i)
+                if let end = input[start...].firstIndex(of: "-") {
+                    let encoded = String(input[start..<end])
+                    if encoded.isEmpty {
+                        result += "&"  // "&-" is the escape for literal "&"
+                    } else {
+                        // Modified UTF-7: uses "," instead of "/" in base64
+                        let base64 = encoded.replacingOccurrences(of: ",", with: "/")
+                        // Base64 must be padded to a multiple of 4
+                        let padded = base64 + String(repeating: "=", count: (4 - base64.count % 4) % 4)
+                        if let data = Data(base64Encoded: padded),
+                           let decoded = String(data: data, encoding: .utf16BigEndian) {
+                            result += decoded
+                        } else {
+                            result += "&\(encoded)-"  // fallback: keep original
+                        }
+                    }
+                    i = input.index(after: end)
+                    continue
+                }
+            }
+            result.append(input[i])
+            i = input.index(after: i)
+        }
+        return result
     }
 }
 
