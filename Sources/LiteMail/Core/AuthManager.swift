@@ -1,5 +1,4 @@
 import Foundation
-import AppKit
 import AppAuth
 
 /// Manages authentication for multiple accounts.
@@ -29,9 +28,7 @@ final class AuthManager: @unchecked Sendable {
         clientId: String,
         authorizationEndpoint: URL,
         tokenEndpoint: URL,
-        scopes: [String],
-        presentingWindow: NSWindow
-        // redirectURI removed — generated dynamically by OIDRedirectHTTPHandler
+        scopes: [String]
     ) async throws {
         // Spin up a local HTTP listener on a random port.
         // Google redirects here after consent: http://127.0.0.1:PORT/?code=...
@@ -53,10 +50,15 @@ final class AuthManager: @unchecked Sendable {
             additionalParameters: nil
         )
 
+        // OIDExternalUserAgentMac() opens the system browser (NSWorkspace.shared.open).
+        // We intentionally use the no-arg init rather than init(presentingWindow:) because
+        // the latter uses ASWebAuthenticationSession, which rejects http:// loopback callbacks.
+        // The loopback redirect is captured by OIDRedirectHTTPHandler's local HTTP server.
+        let agent = OIDExternalUserAgentMac()
         let authState = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<OIDAuthState, Error>) in
             let session = OIDAuthState.authState(
                 byPresenting: request,
-                externalUserAgent: OIDExternalUserAgentMac(presenting: presentingWindow)
+                externalUserAgent: agent
             ) { authState, error in
                 if let authState {
                     continuation.resume(returning: authState)
