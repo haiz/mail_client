@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import AppAuth
 
 /// Manages authentication for multiple accounts.
@@ -28,13 +29,14 @@ final class AuthManager: @unchecked Sendable {
         clientId: String,
         authorizationEndpoint: URL,
         tokenEndpoint: URL,
-        scopes: [String]
+        scopes: [String],
+        presentingWindow: NSWindow
         // redirectURI removed — generated dynamically by OIDRedirectHTTPHandler
     ) async throws {
         // Spin up a local HTTP listener on a random port.
         // Google redirects here after consent: http://127.0.0.1:PORT/?code=...
         let handler = OIDRedirectHTTPHandler(successURL: nil)
-        let redirectURI = try handler.startHTTPListener(nil)
+        let redirectURI = handler.startHTTPListener(nil)
         currentAuthHandler = handler   // retain until callback fires
 
         let configuration = OIDServiceConfiguration(
@@ -54,7 +56,7 @@ final class AuthManager: @unchecked Sendable {
         let authState = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<OIDAuthState, Error>) in
             let session = OIDAuthState.authState(
                 byPresenting: request,
-                externalUserAgent: OIDExternalUserAgentMac()
+                externalUserAgent: OIDExternalUserAgentMac(presenting: presentingWindow)
             ) { authState, error in
                 if let authState {
                     continuation.resume(returning: authState)
