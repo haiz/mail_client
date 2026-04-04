@@ -11,27 +11,36 @@ final class AuthManager: @unchecked Sendable {
     // In-memory cache of OAuth states per account
     private var oauthStates: [String: OIDAuthState] = [:]
 
+    // Retained during OAuth2 browser flow to keep the loopback HTTP handler alive.
+    private nonisolated(unsafe) var currentAuthHandler: OIDRedirectHTTPHandler?
+
     init() {
         // States are loaded lazily from Keychain on first access
     }
 
     // MARK: - OAuth2
 
-    /// Initiates OAuth2 login flow for an account.
+    /// Initiates OAuth2 login flow for an account using the system browser (loopback redirect).
+    /// Requires a "Desktop app" OAuth client type in Google Cloud Console.
     @MainActor
     func authenticateOAuth2(
         accountId: String,
         clientId: String,
         authorizationEndpoint: URL,
         tokenEndpoint: URL,
-        scopes: [String],
-        redirectURI: URL
+        scopes: [String]
+        // redirectURI removed — generated dynamically by OIDRedirectHTTPHandler
     ) async throws {
+        // Spin up a local HTTP listener on a random port.
+        // Google redirects here after consent: http://127.0.0.1:PORT/?code=...
+        let handler = OIDRedirectHTTPHandler(successURL: nil)
+        let redirectURI = try handler.startHTTPListener(nil)
+        currentAuthHandler = handler   // retain until callback fires
+
         let configuration = OIDServiceConfiguration(
             authorizationEndpoint: authorizationEndpoint,
             tokenEndpoint: tokenEndpoint
         )
-
         let request = OIDAuthorizationRequest(
             configuration: configuration,
             clientId: clientId,
@@ -43,7 +52,10 @@ final class AuthManager: @unchecked Sendable {
         )
 
         let authState = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<OIDAuthState, Error>) in
-            _ = OIDAuthState.authState(byPresenting: request) { authState, error in
+            let session = OIDAuthState.authState(
+                byPresenting: request,
+                externalUserAgent: OIDExternalUserAgentMac()
+            ) { authState, error in
                 if let authState {
                     continuation.resume(returning: authState)
                 } else if let error {
@@ -52,10 +64,16 @@ final class AuthManager: @unchecked Sendable {
                     continuation.resume(throwing: AuthError.authenticationFailed)
                 }
             }
+            handler.currentAuthorizationFlow = session   // routes loopback redirect to session
         }
 
+        currentAuthHandler = nil   // release handler after flow completes
+
         oauthStates[accountId] = authState
-        Self.saveToKeychain(accountId: accountId, data: try NSKeyedArchiver.archivedData(withRootObject: authState, requiringSecureCoding: true))
+        Self.saveToKeychain(
+            accountId: accountId,
+            data: try NSKeyedArchiver.archivedData(withRootObject: authState, requiringSecureCoding: true)
+        )
     }
 
     /// Gets a fresh access token for an OAuth2 account, refreshing if needed.
