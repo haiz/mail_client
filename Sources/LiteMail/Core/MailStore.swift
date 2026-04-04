@@ -206,6 +206,8 @@ actor MailStore {
             try db.execute(sql: "DELETE FROM sync_state WHERE account_id = ?", arguments: [id])
             // Delete outbox
             try db.execute(sql: "DELETE FROM outbox WHERE account_id = ?", arguments: [id])
+            // Delete contacts
+            try db.execute(sql: "DELETE FROM contacts WHERE account_id = ?", arguments: [id])
             // Delete account
             try db.execute(sql: "DELETE FROM accounts WHERE id = ?", arguments: [id])
             // Rebuild FTS (some entries may reference deleted emails)
