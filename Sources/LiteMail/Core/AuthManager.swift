@@ -34,9 +34,8 @@ final class AuthManager: @unchecked Sendable {
         // Google redirects here after consent: http://127.0.0.1:PORT/?code=...
         let handler = OIDRedirectHTTPHandler(successURL: nil)
         var startError: NSError?
-        guard let redirectURI = handler.startHTTPListener(&startError) else {
-            throw startError ?? AuthError.authenticationFailed
-        }
+        let redirectURI = handler.startHTTPListener(&startError)
+        if let startError { throw startError }
         currentAuthHandler = handler   // retain until callback fires
 
         let configuration = OIDServiceConfiguration(
