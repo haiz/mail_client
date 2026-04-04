@@ -8,6 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var settingsWindow: SettingsWindow?
     private var addAccountSheet: AddAccountSheet?
     private var composerWindow: ComposerWindow?
+    private var contactsStore: ContactsStore?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let wc = MainWindowController()
@@ -105,6 +106,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let authManager = AuthManager()
             let manager = AccountManager(store: store, authManager: authManager)
             self.accountManager = manager
+            self.contactsStore = ContactsStore(mailStore: store, authManager: authManager)
 
             Task {
                 try await manager.loadAccounts()
@@ -299,6 +301,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func showAddAccount() {
         guard let window = windowController?.window else { return }
         let sheet = AddAccountSheet()
+        if let accountManager {
+            sheet.oauthFlow = GmailOAuthFlow(authManager: accountManager.authManager)
+        }
         sheet.onAddAccount = { [weak self] config, password, completion in
             guard let self, let accountManager = self.accountManager else {
                 completion("App not initialized")
@@ -347,6 +352,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             self.loadMessages()
                             self.updateStatusBar()
                         }
+                    }
+
+                    // Fire-and-forget contacts fetch for OAuth accounts (Gmail)
+                    if config.authType == .oauth2, let contactsStore = self.contactsStore {
+                        Task { await contactsStore.fetchAndStore(accountId: config.id) }
                     }
 
                     await MainActor.run {
