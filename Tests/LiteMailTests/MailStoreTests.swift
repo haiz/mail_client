@@ -196,6 +196,42 @@ final class MailStoreTests: XCTestCase {
         XCTAssertTrue(pending.isEmpty)
     }
 
+    // MARK: - Contacts Tests
+
+    func testContactsTableExists() async throws {
+        let store = try MailStore(path: ":memory:")
+        try await store.upsertContacts([
+            ContactRecord(id: "people/c1", accountId: "acc1", name: "Alice", email: "alice@gmail.com", photoURL: nil, syncedAt: 1000)
+        ])
+        let results = try await store.lookupContacts(prefix: "ali", accountId: "acc1")
+        XCTAssertEqual(results.count, 1)
+        XCTAssertEqual(results.first?.email, "alice@gmail.com")
+    }
+
+    func testContactLookupIsPrefixMatchOnEmailAndName() async throws {
+        let store = try MailStore(path: ":memory:")
+        try await store.upsertContacts([
+            ContactRecord(id: "c1", accountId: "acc1", name: "Bob Smith", email: "bob@example.com", photoURL: nil, syncedAt: 1000),
+            ContactRecord(id: "c2", accountId: "acc1", name: "Alice Jones", email: "alice@example.com", photoURL: nil, syncedAt: 1000),
+        ])
+        let byEmail = try await store.lookupContacts(prefix: "bob", accountId: "acc1")
+        XCTAssertEqual(byEmail.count, 1)
+        XCTAssertEqual(byEmail.first?.name, "Bob Smith")
+
+        let byName = try await store.lookupContacts(prefix: "Alice", accountId: "acc1")
+        XCTAssertEqual(byName.count, 1)
+        XCTAssertEqual(byName.first?.email, "alice@example.com")
+    }
+
+    func testContactsAreAccountScoped() async throws {
+        let store = try MailStore(path: ":memory:")
+        try await store.upsertContacts([
+            ContactRecord(id: "c1", accountId: "acc1", name: "Alice", email: "alice@gmail.com", photoURL: nil, syncedAt: 1000),
+        ])
+        let acc2Results = try await store.lookupContacts(prefix: "alice", accountId: "acc2")
+        XCTAssertTrue(acc2Results.isEmpty)
+    }
+
     // MARK: - Helpers
 
     private func makeEmail(

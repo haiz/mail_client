@@ -2,18 +2,24 @@ import Foundation
 import GRDB
 
 /// Actor that owns all SQLite/GRDB access. Serial access prevents write conflicts.
-/// Uses WAL mode for concurrent reads during sync.
+/// Uses WAL mode for concurrent reads during sync (file-based DBs only).
 actor MailStore {
-    private let dbPool: DatabasePool
+    private let dbPool: any DatabaseWriter & DatabaseReader
 
     init(path: String) throws {
         var config = Configuration()
         config.prepareDatabase { db in
             try db.execute(sql: "PRAGMA cache_size = -2000")
-            try db.execute(sql: "PRAGMA journal_mode = WAL")
             try db.execute(sql: "PRAGMA foreign_keys = ON")
+            if path != ":memory:" {
+                try db.execute(sql: "PRAGMA journal_mode = WAL")
+            }
         }
-        dbPool = try DatabasePool(path: path, configuration: config)
+        if path == ":memory:" {
+            dbPool = try DatabaseQueue(path: path, configuration: config)
+        } else {
+            dbPool = try DatabasePool(path: path, configuration: config)
+        }
         try migrate()
     }
 
@@ -153,6 +159,20 @@ actor MailStore {
             try db.alter(table: "accounts") { t in
                 t.add(column: "imap_username", .text)
             }
+        }
+
+        // v4: Google Contacts cache
+        migrator.registerMigration("v4_contacts") { db in
+            try db.create(table: "contacts") { t in
+                t.column("id", .text).notNull()
+                t.column("account_id", .text).notNull()
+                t.column("name", .text)
+                t.column("email", .text).notNull()
+                t.column("photo_url", .text)
+                t.column("synced_at", .integer).notNull()
+                t.primaryKey(["account_id", "email"])
+            }
+            try db.create(index: "idx_contacts_account_email", on: "contacts", columns: ["account_id", "email"])
         }
 
         try migrator.migrate(dbPool)
@@ -386,6 +406,37 @@ actor MailStore {
         }
     }
 
+    // MARK: - Contacts
+
+    func upsertContacts(_ contacts: [ContactRecord]) throws {
+        try dbPool.write { db in
+            for contact in contacts {
+                try contact.save(db)
+            }
+        }
+    }
+
+    func lookupContacts(prefix: String, accountId: String) throws -> [ContactRecord] {
+        let lowPrefix = prefix.lowercased()
+        let pattern = "\(lowPrefix)%"
+        return try dbPool.read { db in
+            if lowPrefix.isEmpty {
+                return try ContactRecord
+                    .filter(Column("account_id") == accountId)
+                    .order(Column("name").asc)
+                    .limit(20)
+                    .fetchAll(db)
+            }
+            return try ContactRecord.fetchAll(db, sql: """
+                SELECT * FROM contacts
+                WHERE account_id = ?
+                  AND (lower(email) LIKE ? OR lower(name) LIKE ?)
+                ORDER BY name ASC
+                LIMIT 20
+            """, arguments: [accountId, pattern, pattern])
+        }
+    }
+
     // MARK: - Stats
 
     func emailCount(accountId: String? = nil) throws -> Int {
@@ -491,6 +542,23 @@ struct SyncStateRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         case uidValidity = "uid_validity"
         case lastUid = "last_uid"
         case lastSync = "last_sync"
+    }
+}
+
+struct ContactRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
+    static let databaseTableName = "contacts"
+    let id: String
+    let accountId: String
+    let name: String?
+    let email: String
+    let photoURL: String?
+    let syncedAt: Int
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, email
+        case accountId = "account_id"
+        case photoURL = "photo_url"
+        case syncedAt = "synced_at"
     }
 }
 
