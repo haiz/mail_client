@@ -34,6 +34,7 @@ actor GmailOAuthFlow: OAuthFlowProtocol {
             try await authManager.authenticateOAuth2(
                 accountId: accountId,
                 clientId: GoogleConfig.clientId,
+                clientSecret: GoogleConfig.clientSecret,
                 authorizationEndpoint: GoogleConfig.authorizationEndpoint,
                 tokenEndpoint: GoogleConfig.tokenEndpoint,
                 scopes: GoogleConfig.scopes,

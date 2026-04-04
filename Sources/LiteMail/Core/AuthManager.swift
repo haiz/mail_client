@@ -26,6 +26,7 @@ final class AuthManager: @unchecked Sendable {
     func authenticateOAuth2(
         accountId: String,
         clientId: String,
+        clientSecret: String? = nil,
         authorizationEndpoint: URL,
         tokenEndpoint: URL,
         scopes: [String],
@@ -48,7 +49,7 @@ final class AuthManager: @unchecked Sendable {
         let request = OIDAuthorizationRequest(
             configuration: configuration,
             clientId: clientId,
-            clientSecret: nil,
+            clientSecret: clientSecret,
             scopes: scopes,
             redirectURL: redirectURI,
             responseType: OIDResponseTypeCode,
