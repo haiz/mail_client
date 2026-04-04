@@ -29,6 +29,11 @@ final class ContactsStoreTests: XCTestCase {
         urlSession = URLSession(configuration: config)
     }
 
+    override func tearDown() {
+        MockURLProtocol.handler = nil
+        super.tearDown()
+    }
+
     func testFetchAndStoreWritesContactsToDatabase() async throws {
         MockURLProtocol.handler = { request in
             XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer test-token")

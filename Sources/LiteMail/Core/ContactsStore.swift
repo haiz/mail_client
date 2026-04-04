@@ -58,7 +58,7 @@ actor ContactsStore {
 
     /// Returns all cached contacts for the given account (for composer autocomplete preload).
     func allCachedContacts(accountId: String) async throws -> [ContactRecord] {
-        try await mailStore.lookupContacts(prefix: "", accountId: accountId)
+        try await mailStore.lookupContacts(prefix: "", accountId: accountId, limit: 500)
     }
 
     // MARK: - Private

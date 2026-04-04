@@ -418,7 +418,7 @@ actor MailStore {
         }
     }
 
-    func lookupContacts(prefix: String, accountId: String) throws -> [ContactRecord] {
+    func lookupContacts(prefix: String, accountId: String, limit: Int = 20) throws -> [ContactRecord] {
         let lowPrefix = prefix.lowercased()
         let pattern = "\(lowPrefix)%"
         return try dbPool.read { db in
@@ -426,7 +426,7 @@ actor MailStore {
                 return try ContactRecord
                     .filter(Column("account_id") == accountId)
                     .order(Column("name").asc)
-                    .limit(20)
+                    .limit(limit)
                     .fetchAll(db)
             }
             return try ContactRecord.fetchAll(db, sql: """
@@ -434,7 +434,7 @@ actor MailStore {
                 WHERE account_id = ?
                   AND (lower(email) LIKE ? OR lower(name) LIKE ?)
                 ORDER BY name ASC
-                LIMIT 20
+                LIMIT \(limit)
             """, arguments: [accountId, pattern, pattern])
         }
     }
