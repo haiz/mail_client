@@ -2,7 +2,8 @@ import AppKit
 
 /// Sheet for adding a new email account.
 /// Step 1: Enter email address → auto-discovery runs.
-/// Step 2: Show discovered config (or manual form) → confirm.
+/// Step 2a (Gmail): Show "Sign in with Google" button → OAuth flow.
+/// Step 2b (other): Show discovered config (or manual form) → confirm.
 final class AddAccountSheet: NSObject {
 
     private let sheet: NSWindow
@@ -22,7 +23,13 @@ final class AddAccountSheet: NSObject {
     private let passwordField: NSSecureTextField
     private let manualStack: NSStackView
 
+    // Gmail OAuth path
+    private let gmailSignInButton: NSButton
+
     private var discoveryResult: AutoDiscovery.Result?
+
+    /// Injected by AppDelegate. When nil, Gmail accounts fall back to password auth.
+    var oauthFlow: (any OAuthFlowProtocol)?
 
     /// Called when user clicks Connect. Returns config + password.
     /// The caller must attempt connection and call the completion handler
@@ -87,12 +94,18 @@ final class AddAccountSheet: NSObject {
         manualStack.spacing = 8
         manualStack.isHidden = true
 
+        gmailSignInButton = CursorButton(title: "Sign in with Google", target: nil, action: nil)
+        gmailSignInButton.bezelStyle = .rounded
+        gmailSignInButton.isHidden = true
+
         super.init()
 
         addButton.target = self
         addButton.action = #selector(addClicked)
         cancelButton.target = self
         cancelButton.action = #selector(cancelClicked)
+        gmailSignInButton.target = self
+        gmailSignInButton.action = #selector(gmailSignInClicked)
 
         setupLayout()
     }
@@ -146,6 +159,7 @@ final class AddAccountSheet: NSObject {
             titleLabel, subtitleLabel,
             emailLabel, emailField,
             statusLabel, progressIndicator,
+            gmailSignInButton,
             manualStack,
         ])
         mainStack.orientation = .vertical
@@ -198,6 +212,13 @@ final class AddAccountSheet: NSObject {
         sheet.sheetParent?.endSheet(sheet)
     }
 
+    @objc private func gmailSignInClicked() {
+        let email = emailField.stringValue.trimmingCharacters(in: .whitespaces)
+        startGmailOAuth(email: email)
+    }
+
+    // MARK: - Discovery
+
     private func runDiscovery(email: String) {
         statusLabel.stringValue = "Discovering server settings..."
         statusLabel.textColor = .secondaryLabelColor
@@ -217,19 +238,101 @@ final class AddAccountSheet: NSObject {
             statusLabel.stringValue = "Found: \(providerName)"
             statusLabel.textColor = .systemGreen
 
-            // Pre-fill manual fields
-            protocolPicker.selectItem(withTitle: result.protocolType == .jmap ? "JMAP" : "IMAP")
-            usernameField.stringValue = result.imapUsername ?? ""
-            hostField.stringValue = result.imapHost ?? result.jmapUrl ?? ""
-            portField.stringValue = result.imapPort.map(String.init) ?? ""
-            smtpHostField.stringValue = result.smtpHost ?? ""
-            smtpPortField.stringValue = result.smtpPort.map(String.init) ?? ""
+            if result.authType == .oauth2 && oauthFlow != nil {
+                // Gmail path: show OAuth button, skip manual password fields
+                gmailSignInButton.isHidden = false
+                addButton.isHidden = true
+            } else {
+                // Standard path: pre-fill manual fields for password entry
+                protocolPicker.selectItem(withTitle: result.protocolType == .jmap ? "JMAP" : "IMAP")
+                usernameField.stringValue = result.imapUsername ?? ""
+                hostField.stringValue = result.imapHost ?? result.jmapUrl ?? ""
+                portField.stringValue = result.imapPort.map(String.init) ?? ""
+                smtpHostField.stringValue = result.smtpHost ?? ""
+                smtpPortField.stringValue = result.smtpPort.map(String.init) ?? ""
 
-            // Show manual fields for password entry
-            manualStack.isHidden = false
-            addButton.title = "Connect"
+                manualStack.isHidden = false
+                addButton.title = "Connect"
+            }
         }
     }
+
+    // MARK: - Gmail OAuth
+
+    private func startGmailOAuth(email: String) {
+        guard let flow = oauthFlow, let result = discoveryResult else { return }
+
+        gmailSignInButton.isEnabled = false
+        cancelButton.isEnabled = false
+        statusLabel.stringValue = "Opening browser for sign-in..."
+        statusLabel.textColor = .secondaryLabelColor
+        statusLabel.isHidden = false
+        progressIndicator.isHidden = false
+        progressIndicator.startAnimation(nil)
+
+        let accountId = UUID().uuidString
+        let config = AccountConfig(
+            id: accountId,
+            emailAddress: email,
+            displayName: nil,
+            protocolType: .imap,
+            imapUsername: email,
+            imapHost: result.imapHost,
+            imapPort: result.imapPort,
+            smtpHost: result.smtpHost,
+            smtpPort: result.smtpPort,
+            jmapUrl: nil,
+            authType: .oauth2,
+            keychainRef: "account-\(accountId)",
+            isDefault: false
+        )
+
+        Task { @MainActor in
+            do {
+                try await flow.authenticate(accountId: accountId, email: email)
+                // OAuth succeeded — hand off to AppDelegate to add and verify the account
+                self.onAddAccount?(config, nil) { [weak self] errorMessage in
+                    guard let self else { return }
+                    DispatchQueue.main.async {
+                        self.progressIndicator.stopAnimation(nil)
+                        self.progressIndicator.isHidden = true
+                        self.gmailSignInButton.isEnabled = true
+                        self.cancelButton.isEnabled = true
+
+                        if let errorMessage {
+                            self.statusLabel.stringValue = errorMessage
+                            self.statusLabel.textColor = .systemRed
+                        } else {
+                            self.sheet.sheetParent?.endSheet(self.sheet)
+                        }
+                    }
+                }
+            } catch OAuthError.cancelled {
+                progressIndicator.stopAnimation(nil)
+                progressIndicator.isHidden = true
+                gmailSignInButton.isEnabled = true
+                cancelButton.isEnabled = true
+                statusLabel.stringValue = "Sign-in was cancelled."
+                statusLabel.textColor = .secondaryLabelColor
+            } catch OAuthError.failed(let msg) {
+                progressIndicator.stopAnimation(nil)
+                progressIndicator.isHidden = true
+                gmailSignInButton.isEnabled = true
+                cancelButton.isEnabled = true
+                statusLabel.stringValue = "Sign-in failed: \(msg). Check your Google Client ID in Preferences."
+                statusLabel.textColor = .systemRed
+            } catch {
+                progressIndicator.stopAnimation(nil)
+                progressIndicator.isHidden = true
+                gmailSignInButton.isEnabled = true
+                cancelButton.isEnabled = true
+                statusLabel.stringValue = "Sign-in failed: \(error.localizedDescription)"
+                statusLabel.textColor = .systemRed
+            }
+        }
+    }
+
+    // MARK: - Standard account confirmation
 
     private func confirmAccount(email: String) {
         let isJMAP = protocolPicker.titleOfSelectedItem == "JMAP"
