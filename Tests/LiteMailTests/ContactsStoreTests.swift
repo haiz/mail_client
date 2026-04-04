@@ -29,12 +29,23 @@ final class ContactsStoreTests: XCTestCase {
         urlSession = URLSession(configuration: config)
     }
 
+    /// Seeds the account referenced by tests. Contacts table has a FK on accounts.id.
+    private func insertAccount(id: String) async throws {
+        let record = AccountRecord(
+            id: id, emailAddress: "\(id)@test.com",
+            protocolType: "imap", authType: "oauth2",
+            keychainRef: "test-\(id)", isDefault: false
+        )
+        try await mailStore.insertAccount(record)
+    }
+
     override func tearDown() {
         MockURLProtocol.handler = nil
         super.tearDown()
     }
 
     func testFetchAndStoreWritesContactsToDatabase() async throws {
+        try await insertAccount(id: "acc1")
         MockURLProtocol.handler = { request in
             XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer test-token")
             let body = """
@@ -64,6 +75,7 @@ final class ContactsStoreTests: XCTestCase {
     }
 
     func testFetchAndStoreHandlesPagination() async throws {
+        try await insertAccount(id: "acc1")
         var callCount = 0
         MockURLProtocol.handler = { _ in
             callCount += 1
@@ -84,6 +96,7 @@ final class ContactsStoreTests: XCTestCase {
     }
 
     func testFetchAndStoreIsNonFatalOnHTTPError() async throws {
+        try await insertAccount(id: "acc1")
         MockURLProtocol.handler = { request in
             let resp = HTTPURLResponse(url: request.url!, statusCode: 403, httpVersion: nil, headerFields: nil)!
             return (Data(), resp)

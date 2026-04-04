@@ -200,6 +200,7 @@ final class MailStoreTests: XCTestCase {
 
     func testContactsTableExists() async throws {
         let store = try MailStore(path: ":memory:")
+        try await store.insertAccount(AccountRecord(id: "acc1", emailAddress: "acc1@test.com", protocolType: "imap", authType: "oauth2", keychainRef: "k1", isDefault: false))
         try await store.upsertContacts([
             ContactRecord(id: "people/c1", accountId: "acc1", name: "Alice", email: "alice@gmail.com", photoURL: nil, syncedAt: 1000)
         ])
@@ -210,6 +211,7 @@ final class MailStoreTests: XCTestCase {
 
     func testContactLookupIsPrefixMatchOnEmailAndName() async throws {
         let store = try MailStore(path: ":memory:")
+        try await store.insertAccount(AccountRecord(id: "acc1", emailAddress: "acc1@test.com", protocolType: "imap", authType: "oauth2", keychainRef: "k1", isDefault: false))
         try await store.upsertContacts([
             ContactRecord(id: "c1", accountId: "acc1", name: "Bob Smith", email: "bob@example.com", photoURL: nil, syncedAt: 1000),
             ContactRecord(id: "c2", accountId: "acc1", name: "Alice Jones", email: "alice@example.com", photoURL: nil, syncedAt: 1000),
@@ -225,6 +227,7 @@ final class MailStoreTests: XCTestCase {
 
     func testContactsAreAccountScoped() async throws {
         let store = try MailStore(path: ":memory:")
+        try await store.insertAccount(AccountRecord(id: "acc1", emailAddress: "acc1@test.com", protocolType: "imap", authType: "oauth2", keychainRef: "k1", isDefault: false))
         try await store.upsertContacts([
             ContactRecord(id: "c1", accountId: "acc1", name: "Alice", email: "alice@gmail.com", photoURL: nil, syncedAt: 1000),
         ])

@@ -319,7 +319,10 @@ final class AddAccountSheet: NSObject {
                 progressIndicator.isHidden = true
                 gmailSignInButton.isEnabled = true
                 cancelButton.isEnabled = true
-                statusLabel.stringValue = "Sign-in failed: \(msg). Check your Google Client ID in Preferences."
+                let displayMsg = msg.contains("invalid_client")
+                    ? "Sign-in failed: invalid client. Enter your Google Client ID in Settings → Google."
+                    : "Sign-in failed: \(msg)"
+                statusLabel.stringValue = displayMsg
                 statusLabel.textColor = .systemRed
             } catch {
                 progressIndicator.stopAnimation(nil)

@@ -165,7 +165,7 @@ actor MailStore {
         migrator.registerMigration("v4_contacts") { db in
             try db.create(table: "contacts") { t in
                 t.column("id", .text).notNull()
-                t.column("account_id", .text).notNull()
+                t.column("account_id", .text).notNull().references("accounts", onDelete: .cascade)
                 t.column("name", .text)
                 t.column("email", .text).notNull()
                 t.column("photo_url", .text)

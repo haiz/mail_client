@@ -10,6 +10,8 @@ extension AuthManager: TokenProvider {}
 /// Fetches Google Contacts from the People API and caches them in SQLite for composer autocomplete.
 /// fetchAndStore() is non-fatal — failures are logged and swallowed.
 actor ContactsStore {
+    /// Maximum number of contacts returned by allCachedContacts for composer preload.
+    static let preloadLimit = 500
     private let mailStore: MailStore
     private let tokenProvider: any TokenProvider
     private let urlSession: URLSession
@@ -58,7 +60,7 @@ actor ContactsStore {
 
     /// Returns all cached contacts for the given account (for composer autocomplete preload).
     func allCachedContacts(accountId: String) async throws -> [ContactRecord] {
-        try await mailStore.lookupContacts(prefix: "", accountId: accountId, limit: 500)
+        try await mailStore.lookupContacts(prefix: "", accountId: accountId, limit: Self.preloadLimit)
     }
 
     // MARK: - Private
