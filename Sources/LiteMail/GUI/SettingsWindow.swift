@@ -6,6 +6,7 @@ final class SettingsWindow: NSObject {
     private let window: NSWindow
     private let accountTableView: NSTableView
     private var signatureField: NSTextField?
+    private var googleClientIdField: NSTextField?
 
     var onAddAccount: (() -> Void)?
     var onRemoveAccount: ((String) -> Void)?
@@ -90,6 +91,25 @@ final class SettingsWindow: NSObject {
         saveSigButton.bezelStyle = .rounded
         self.signatureField = sigField
 
+        // Google section
+        let googleHeader = Self.sectionHeader("Google")
+        let googleClientIdField = NSTextField()
+        googleClientIdField.placeholderString = "YOUR_CLIENT_ID.apps.googleusercontent.com"
+        googleClientIdField.stringValue = UserDefaults.standard.string(forKey: GoogleConfig.clientIdDefaultsKey) ?? ""
+        googleClientIdField.font = .systemFont(ofSize: 12)
+        googleClientIdField.translatesAutoresizingMaskIntoConstraints = false
+        googleClientIdField.widthAnchor.constraint(equalToConstant: 400).isActive = true
+        self.googleClientIdField = googleClientIdField
+
+        let googleHint = NSTextField(labelWithString: "OAuth 2.0 Client ID from Google Cloud Console (Desktop app type). Required for Gmail sign-in.")
+        googleHint.font = .systemFont(ofSize: 11)
+        googleHint.textColor = .secondaryLabelColor
+        googleHint.lineBreakMode = .byWordWrapping
+        googleHint.preferredMaxLayoutWidth = 400
+
+        let saveGoogleButton = CursorButton(title: "Save Client ID", target: self, action: #selector(saveGoogleClientId))
+        saveGoogleButton.bezelStyle = .rounded
+
         // About
         let aboutHeader = Self.sectionHeader("About")
         let versionLabel = NSTextField(labelWithString: "LiteMail v0.2.0 — Multi-account IMAP/JMAP")
@@ -102,6 +122,8 @@ final class SettingsWindow: NSObject {
             statsHeader, countLabel, syncButton,
             Self.spacer(),
             sigHeader, sigField, saveSigButton,
+            Self.spacer(),
+            googleHeader, googleClientIdField, googleHint, saveGoogleButton,
             Self.spacer(),
             aboutHeader, versionLabel,
         ])
@@ -153,6 +175,20 @@ final class SettingsWindow: NSObject {
         UserDefaults.standard.set(sig, forKey: "email_signature")
         let alert = NSAlert()
         alert.messageText = "Signature saved"
+        alert.alertStyle = .informational
+        alert.runModal()
+    }
+
+    @objc private func saveGoogleClientId() {
+        let clientId = googleClientIdField?.stringValue.trimmingCharacters(in: .whitespaces) ?? ""
+        if clientId.isEmpty {
+            UserDefaults.standard.removeObject(forKey: GoogleConfig.clientIdDefaultsKey)
+        } else {
+            UserDefaults.standard.set(clientId, forKey: GoogleConfig.clientIdDefaultsKey)
+        }
+        let alert = NSAlert()
+        alert.messageText = "Client ID saved"
+        alert.informativeText = "The Google Client ID will be used for the next Gmail sign-in."
         alert.alertStyle = .informational
         alert.runModal()
     }

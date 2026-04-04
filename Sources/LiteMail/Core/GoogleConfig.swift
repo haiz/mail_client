@@ -2,11 +2,14 @@
 import Foundation
 
 enum GoogleConfig {
+    /// UserDefaults key for the user-supplied Google Client ID override.
+    static let clientIdDefaultsKey = "googleClientId"
+
     /// Client ID registered in Google Cloud Console under the LiteMail project.
     /// OAuth client type: "Desktop app" — supports loopback redirect URIs.
     /// Power users can override this via Settings → Google Client ID.
     static var clientId: String {
-        UserDefaults.standard.string(forKey: "googleClientId") ?? bundledClientId
+        UserDefaults.standard.string(forKey: clientIdDefaultsKey) ?? bundledClientId
     }
 
     /// The bundled client ID. Replace with the value from Google Cloud Console.

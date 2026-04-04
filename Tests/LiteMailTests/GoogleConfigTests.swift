@@ -4,24 +4,24 @@ import XCTest
 
 final class GoogleConfigTests: XCTestCase {
     override func tearDown() {
-        UserDefaults.standard.removeObject(forKey: "googleClientId")
+        UserDefaults.standard.removeObject(forKey: GoogleConfig.clientIdDefaultsKey)
         super.tearDown()
     }
 
     func testBundledClientIdUsedByDefault() {
-        UserDefaults.standard.removeObject(forKey: "googleClientId")
+        UserDefaults.standard.removeObject(forKey: GoogleConfig.clientIdDefaultsKey)
         XCTAssertFalse(GoogleConfig.clientId.isEmpty)
         XCTAssertEqual(GoogleConfig.clientId, GoogleConfig.bundledClientId)
     }
 
     func testUserDefaultsOverridesTakePrecedence() {
-        UserDefaults.standard.set("custom-client-id", forKey: "googleClientId")
+        UserDefaults.standard.set("custom-client-id", forKey: GoogleConfig.clientIdDefaultsKey)
         XCTAssertEqual(GoogleConfig.clientId, "custom-client-id")
     }
 
     func testClearingOverrideRestoresBundled() {
-        UserDefaults.standard.set("custom-client-id", forKey: "googleClientId")
-        UserDefaults.standard.removeObject(forKey: "googleClientId")
+        UserDefaults.standard.set("custom-client-id", forKey: GoogleConfig.clientIdDefaultsKey)
+        UserDefaults.standard.removeObject(forKey: GoogleConfig.clientIdDefaultsKey)
         XCTAssertEqual(GoogleConfig.clientId, GoogleConfig.bundledClientId)
     }
 
