@@ -1,5 +1,6 @@
 // Sources/LiteMail/Core/GmailOAuthFlow.swift
 import Foundation
+import AppAuth
 
 /// Errors thrown by OAuth2 browser flows.
 enum OAuthError: Error, LocalizedError {
@@ -35,16 +36,19 @@ actor GmailOAuthFlow: OAuthFlowProtocol {
                 clientId: GoogleConfig.clientId,
                 authorizationEndpoint: GoogleConfig.authorizationEndpoint,
                 tokenEndpoint: GoogleConfig.tokenEndpoint,
-                scopes: GoogleConfig.scopes
+                scopes: GoogleConfig.scopes,
+                loginHint: email
             )
         } catch let error as OAuthError {
             throw error
         } catch {
-            let reason = error.localizedDescription
-            if reason.lowercased().contains("cancel") {
+            let ns = error as NSError
+            // OIDErrorCodeUserCanceledAuthorizationFlow = -3
+            // OIDErrorCodeProgramCanceledAuthorizationFlow = -4
+            if ns.domain == OIDGeneralErrorDomain && (ns.code == -3 || ns.code == -4) {
                 throw OAuthError.cancelled
             }
-            throw OAuthError.failed(reason)
+            throw OAuthError.failed(ns.localizedDescription)
         }
     }
 }

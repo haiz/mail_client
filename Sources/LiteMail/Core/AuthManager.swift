@@ -28,7 +28,8 @@ final class AuthManager: @unchecked Sendable {
         clientId: String,
         authorizationEndpoint: URL,
         tokenEndpoint: URL,
-        scopes: [String]
+        scopes: [String],
+        loginHint: String? = nil
     ) async throws {
         // Spin up a local HTTP listener on a random port.
         // Google redirects here after consent: http://127.0.0.1:PORT/?code=...
@@ -42,6 +43,8 @@ final class AuthManager: @unchecked Sendable {
             authorizationEndpoint: authorizationEndpoint,
             tokenEndpoint: tokenEndpoint
         )
+        var additionalParameters: [String: String]? = nil
+        if let loginHint { additionalParameters = ["login_hint": loginHint] }
         let request = OIDAuthorizationRequest(
             configuration: configuration,
             clientId: clientId,
@@ -49,7 +52,7 @@ final class AuthManager: @unchecked Sendable {
             scopes: scopes,
             redirectURL: redirectURI,
             responseType: OIDResponseTypeCode,
-            additionalParameters: nil
+            additionalParameters: additionalParameters
         )
 
         // OIDExternalUserAgentMac() opens the system browser (NSWorkspace.shared.open).
