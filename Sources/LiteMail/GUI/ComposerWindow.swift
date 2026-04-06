@@ -26,8 +26,9 @@ final class ComposerWindow: NSObject {
     private var pendingSuggestions: [ContactRecord] = []
     private weak var suggestionField: NSTextField?
 
-    /// Called when the user clicks Send. Receives the composed message.
-    var onSend: ((OutgoingMessage) -> Void)?
+    /// Called when the user clicks Send. Receives the message and a completion handler.
+    /// Call completion(nil) on success, completion("error message") on failure.
+    var onSend: ((OutgoingMessage, @escaping (String?) -> Void) -> Void)?
     /// Called periodically for draft auto-save.
     var onSaveDraft: ((OutgoingMessage) -> Void)?
 
@@ -44,6 +45,11 @@ final class ComposerWindow: NSObject {
             backing: .buffered,
             defer: false
         )
+        // NSWindow defaults isReleasedWhenClosed = true, which causes AppKit to call
+        // [window release] on close(). Since ComposerWindow holds a strong reference,
+        // that release would free the underlying object while our stored property still
+        // points to it, causing a double-free when ComposerWindow later deallocates.
+        window.isReleasedWhenClosed = false
         window.title = Self.windowTitle(for: mode)
         window.center()
         window.minSize = NSSize(width: 400, height: 300)
@@ -105,6 +111,12 @@ final class ComposerWindow: NSObject {
 
     func close() {
         autoSaveTimer?.invalidate()
+        // Clear AppKit assign-typed delegate pointers before the window is released.
+        // NSTextField.delegate is an unsafe `assign` property — if the delegate object is
+        // deallocated while still set, AppKit's internal NSConcretePointerArray retains a
+        // dangling pointer and crashes during the next CA commit.
+        toField.delegate = nil
+        ccField.delegate = nil
         window.close()
     }
 
@@ -378,8 +390,33 @@ final class ComposerWindow: NSObject {
             NSSound.beep()
             return
         }
-        onSend?(message)
-        close()
+
+        sendButton.isEnabled = false
+        sendButton.title = "Sending…"
+
+        onSend?(message) { [weak self] errorMessage in
+            guard let self else { return }
+            DispatchQueue.main.async {
+                if let errorMessage {
+                    self.sendButton.isEnabled = true
+                    self.sendButton.title = "Send"
+                    let alert = NSAlert()
+                    alert.messageText = "Failed to Send"
+                    alert.informativeText = errorMessage
+                    alert.alertStyle = .warning
+                    alert.runModal()
+                } else {
+                    self.sendButton.title = "Sent ✓"
+                    // Keep strong reference so close() fires after the 0.8s delay.
+                    // [weak self] would allow ComposerWindow to be deallocated
+                    // (AppDelegate nils composerWindow right after completion(nil)),
+                    // leaving self nil when the timer fires and close() never called.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                        self.close()
+                    }
+                }
+            }
+        }
     }
 
     private func buildMessage() -> OutgoingMessage {

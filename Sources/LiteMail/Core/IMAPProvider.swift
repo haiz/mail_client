@@ -13,7 +13,6 @@ actor IMAPProvider: MailProvider {
     private let store: MailStore
 
     private var imapServer: IMAPServer?
-    private var smtpServer: SMTPServer?
     private var reconnectAttempts = 0
     private let maxReconnectDelay: TimeInterval = 60
 
@@ -42,7 +41,11 @@ actor IMAPProvider: MailProvider {
         switch config.authType {
         case .oauth2:
             let token = try await authManager.oauthAccessToken(accountId: accountId)
-            try await server.authenticateXOAUTH2(email: emailAddress, accessToken: token)
+            do {
+                try await server.authenticateXOAUTH2(email: emailAddress, accessToken: token)
+            } catch {
+                throw IMAPProviderError.authFailed(error.localizedDescription)
+            }
         case .password:
             guard let password = authManager.getPassword(accountId: accountId), !password.isEmpty else {
                 throw IMAPProviderError.noCredentials
@@ -67,10 +70,7 @@ actor IMAPProvider: MailProvider {
             try? await server.logout()
             imapServer = nil
         }
-        if let server = smtpServer {
-            try? await server.disconnect()
-            smtpServer = nil
-        }
+
     }
 
     private func getIMAP() async throws -> IMAPServer {
@@ -87,7 +87,14 @@ actor IMAPProvider: MailProvider {
         let folders = try await listFolders()
 
         for folder in folders where !Self.isSkippedFolder(folder.id) {
-            try await syncFolder(imap: imap, folderId: folder.id)
+            do {
+                try await syncFolder(imap: imap, folderId: folder.id)
+            } catch {
+                // If the connection died mid-sync (e.g. server dropped it and SwiftMail's
+                // internal PLAIN re-auth failed), clear imapServer so the next call to
+                // getIMAP() reconnects via connect() which has the PLAIN→LOGIN fallback.
+                imapServer = nil
+            }
         }
     }
 
@@ -96,7 +103,12 @@ actor IMAPProvider: MailProvider {
         let folders = try await listFolders()
 
         for folder in folders where !Self.isSkippedFolder(folder.id) {
-            try await incrementalSyncFolder(imap: imap, folderId: folder.id)
+            do {
+                try await incrementalSyncFolder(imap: imap, folderId: folder.id)
+            } catch {
+                // Same as above: clear stale connection on any per-folder failure.
+                imapServer = nil
+            }
         }
     }
 
@@ -284,36 +296,121 @@ actor IMAPProvider: MailProvider {
 
     // MARK: - Send
 
+    /// Send an email via SMTP. All actor-state reads happen here (on the actor),
+    /// then the actual SMTP work is dispatched through a nonisolated static method
+    /// so it never competes with ongoing IMAP operations on this actor.
     func send(message: OutgoingMessage) async throws {
-        let host = config.smtpHost ?? "smtp.gmail.com"
-        let port = config.smtpPort ?? 465
+        // --- Read all actor state before leaving the actor ---
+        let host     = config.smtpHost ?? "smtp.gmail.com"
+        let port     = config.smtpPort ?? 465
+        let user     = loginUsername
+        let from     = emailAddress
+        let authType = config.authType
 
-        if smtpServer == nil {
-            let server = SMTPServer(host: host, port: port)
-            try await server.connect()
-
-            switch config.authType {
-            case .oauth2:
-                let token = try await authManager.oauthAccessToken(accountId: accountId)
-                try await server.authenticateXOAUTH2(email: emailAddress, accessToken: token)
-            case .password:
-                let password = authManager.getPassword(accountId: accountId) ?? ""
-                try await server.login(username: loginUsername, password: password)
-            case .bearer:
-                break
-            }
-            smtpServer = server
+        // OAuth2 token fetch is async but still fast (cached / refresh).
+        let credential: String
+        switch authType {
+        case .oauth2:
+            credential = try await authManager.oauthAccessToken(accountId: accountId)
+        case .password:
+            credential = authManager.getPassword(accountId: accountId) ?? ""
+        case .bearer:
+            credential = ""
         }
 
+        // Delegate to a nonisolated static function so withThrowingTaskGroup
+        // tasks run off this actor's executor — no actor contention, reliable timeout.
+        try await Self.smtpSend(
+            host: host, port: port,
+            user: user, from: from,
+            authType: authType, credential: credential,
+            message: message
+        )
+
+        // After SMTP succeeds, save a copy to the Sent folder via IMAP APPEND.
+        // Non-fatal: a failed append should not roll back a successful send.
         let email = Email(
             senderName: nil,
-            senderAddress: emailAddress,
+            senderAddress: from,
             recipientNames: nil,
             recipientAddresses: message.to,
             subject: message.subject,
             textBody: message.bodyText
         )
-        try await smtpServer?.sendEmail(email)
+        try? await saveSentCopy(email: email)
+    }
+
+    /// Appends a sent message to the Sent IMAP folder.
+    /// Creates the folder first if it does not exist.
+    private func saveSentCopy(email: Email) async throws {
+        let imap = try await getIMAP()
+        let sentFolder = try await resolveSentFolder(imap: imap)
+        _ = try await imap.append(email: email, to: sentFolder, flags: [.seen])
+    }
+
+    /// Returns the name of the Sent folder, creating it if it doesn't exist.
+    private func resolveSentFolder(imap: IMAPServer) async throws -> String {
+        let mailboxes = try await imap.listMailboxes()
+        let sentNames: [String] = ["Sent", "Sent Items", "Sent Messages", "[Gmail]/Sent Mail"]
+        for name in sentNames {
+            if mailboxes.contains(where: { $0.name == name }) {
+                return name
+            }
+        }
+        // No Sent folder found — create one.
+        try await imap.createMailbox("Sent")
+        return "Sent"
+    }
+
+    /// Nonisolated SMTP helper. Runs entirely on the cooperative thread pool.
+    /// Uses CheckedContinuation so the timeout returns IMMEDIATELY without
+    /// waiting for SwiftMail's internal NIO command timeouts to fire.
+    private static func smtpSend(
+        host: String, port: Int,
+        user: String, from: String,
+        authType: AccountConfig.AuthType, credential: String,
+        message: OutgoingMessage
+    ) async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            let once = SMTPOnceFlag()
+
+            // Task 1: do the SMTP work
+            let sendTask = Task.detached {
+                do {
+                    let smtp = SMTPServer(host: host, port: port)
+                    try await smtp.connect()
+
+                    switch authType {
+                    case .oauth2:
+                        try await smtp.authenticateXOAUTH2(email: from, accessToken: credential)
+                    case .password:
+                        try await smtp.login(username: user, password: credential)
+                    case .bearer:
+                        break
+                    }
+
+                    let email = Email(
+                        senderName: nil,
+                        senderAddress: from,
+                        recipientNames: nil,
+                        recipientAddresses: message.to,
+                        subject: message.subject,
+                        textBody: message.bodyText
+                    )
+                    try await smtp.sendEmail(email)
+                    once.resume(continuation, with: .success(()))
+                } catch {
+                    once.resume(continuation, with: .failure(error))
+                }
+            }
+
+            // Task 2: 30-second hard deadline
+            Task.detached {
+                try? await Task.sleep(nanoseconds: 30_000_000_000)
+                once.resume(continuation, with: .failure(IMAPProviderError.smtpTimeout))
+                sendTask.cancel()   // best-effort; NIO ignores it but stops future Swift hops
+            }
+        }
     }
 
     // MARK: - Helpers
@@ -392,7 +489,9 @@ actor IMAPProvider: MailProvider {
         case "[Gmail]/Starred": return .starred
         case "[Gmail]/All Mail": return .all
         case "[Gmail]/Spam", "Spam", "Junk": return .spam
-        default: return nil
+        default:
+            if name.hasPrefix("[Gmail]/Category/") { return .category }
+            return nil
         }
     }
 
@@ -404,7 +503,12 @@ actor IMAPProvider: MailProvider {
         case "[Gmail]/Trash": return "Trash"
         case "[Gmail]/Starred": return "Starred"
         case "[Gmail]/All Mail": return "All Mail"
+        case "[Gmail]/Spam": return "Spam"
         default:
+            // Gmail categories: strip "[Gmail]/Category/" prefix
+            if folder.hasPrefix("[Gmail]/Category/") {
+                return String(folder.dropFirst("[Gmail]/Category/".count))
+            }
             // Decode Modified UTF-7, then show only the leaf label name.
             // "Cá nhân/ACE" → "ACE" (the parent "Cá nhân" is a separate folder entry)
             let decoded = decodeModifiedUTF7(folder)
@@ -448,8 +552,34 @@ actor IMAPProvider: MailProvider {
     }
 }
 
-enum IMAPProviderError: Error {
+/// Thread-safe once-flag used to ensure a CheckedContinuation is resumed exactly once.
+private final class SMTPOnceFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var resumed = false
+
+    func resume(_ continuation: CheckedContinuation<Void, Error>, with result: Result<Void, Error>) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !resumed else { return }
+        resumed = true
+        continuation.resume(with: result)
+    }
+}
+
+enum IMAPProviderError: Error, LocalizedError {
     case notConnected
     case messageNotFound
     case noCredentials
+    case authFailed(String)
+    case smtpTimeout
+
+    var errorDescription: String? {
+        switch self {
+        case .notConnected: return "IMAP not connected."
+        case .messageNotFound: return "Message not found."
+        case .noCredentials: return "No credentials found. Please re-add the account."
+        case .authFailed(let detail): return "Authentication failed: \(detail)"
+        case .smtpTimeout: return "Send timed out after 30 seconds. Check your SMTP server settings (host, port, credentials)."
+        }
+    }
 }
