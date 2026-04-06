@@ -175,6 +175,71 @@ actor MailStore {
             try db.create(index: "idx_contacts_account_email", on: "contacts", columns: ["account_id", "email"])
         }
 
+        // v5: UID-based email uniqueness
+        // Replaces the global UNIQUE(message_id) constraint with a partial unique index on
+        // (account_id, folder, uid) WHERE uid IS NOT NULL. Same message_id in different accounts
+        // (e.g. Sent on one account, INBOX on another) now coexists correctly.
+        // We clear all synced email data so the app performs a fresh full sync after migration.
+        migrator.registerMigration("v5_multi_folder_emails") { db in
+            // Wipe synced data (forces full re-sync on next launch)
+            try db.execute(sql: "DELETE FROM email_fts")
+            try db.execute(sql: "DELETE FROM email_bodies")
+            try db.execute(sql: "DELETE FROM labels")
+            try db.execute(sql: "DELETE FROM emails")
+            try db.execute(sql: "DELETE FROM sync_state")
+
+            // Recreate emails table without any UNIQUE constraint on message_id.
+            // FK enforcement must be disabled while we drop and rename.
+            try db.execute(sql: "PRAGMA foreign_keys = OFF")
+            try db.execute(sql: """
+                CREATE TABLE emails_v5 (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    message_id TEXT NOT NULL,
+                    thread_id TEXT,
+                    folder TEXT NOT NULL DEFAULT 'INBOX',
+                    sender_name TEXT,
+                    sender_email TEXT NOT NULL,
+                    recipients TEXT,
+                    subject TEXT,
+                    date INTEGER NOT NULL DEFAULT 0,
+                    is_read INTEGER NOT NULL DEFAULT 0,
+                    is_starred INTEGER NOT NULL DEFAULT 0,
+                    is_deleted INTEGER NOT NULL DEFAULT 0,
+                    has_attachments INTEGER NOT NULL DEFAULT 0,
+                    uid INTEGER,
+                    flags TEXT,
+                    references_header TEXT,
+                    in_reply_to TEXT,
+                    created_at INTEGER,
+                    account_id TEXT NOT NULL DEFAULT 'default'
+                )
+            """)
+            try db.execute(sql: "DROP INDEX IF EXISTS idx_emails_thread")
+            try db.execute(sql: "DROP INDEX IF EXISTS idx_emails_folder")
+            try db.execute(sql: "DROP INDEX IF EXISTS idx_emails_date")
+            try db.execute(sql: "DROP INDEX IF EXISTS idx_emails_sender")
+            try db.execute(sql: "DROP INDEX IF EXISTS idx_emails_account")
+            try db.execute(sql: "DROP INDEX IF EXISTS idx_emails_account_folder")
+            try db.execute(sql: "DROP INDEX IF EXISTS idx_emails_uid")
+            try db.execute(sql: "DROP TABLE emails")
+            try db.execute(sql: "ALTER TABLE emails_v5 RENAME TO emails")
+            try db.execute(sql: "PRAGMA foreign_keys = ON")
+
+            try db.create(index: "idx_emails_thread", on: "emails", columns: ["thread_id"])
+            try db.create(index: "idx_emails_folder", on: "emails", columns: ["folder"])
+            try db.create(index: "idx_emails_date", on: "emails", columns: ["date"])
+            try db.create(index: "idx_emails_sender", on: "emails", columns: ["sender_email"])
+            try db.create(index: "idx_emails_account", on: "emails", columns: ["account_id"])
+            try db.create(index: "idx_emails_account_folder", on: "emails", columns: ["account_id", "folder"])
+            // Partial unique index: deduplicate by IMAP UID per account+folder.
+            // Rows with uid IS NULL are excluded — they cannot be deduplicated.
+            try db.execute(sql: """
+                CREATE UNIQUE INDEX idx_emails_uid
+                ON emails (account_id, folder, uid)
+                WHERE uid IS NOT NULL
+            """)
+        }
+
         try migrator.migrate(dbPool)
     }
 
@@ -219,18 +284,31 @@ actor MailStore {
 
     func insertEmail(_ record: EmailRecord) throws -> Int64 {
         try dbPool.write { db in
-            try record.insert(db)
-            let emailId = db.lastInsertedRowID
+            try record.insert(db, onConflict: .ignore)
 
-            try db.execute(
-                sql: """
-                    INSERT INTO email_fts(rowid, subject, body_text, sender_name, sender_email)
-                    VALUES (?, ?, ?, ?, ?)
-                """,
-                arguments: [emailId, record.subject, nil, record.senderName, record.senderEmail]
-            )
-
-            return emailId
+            if db.changesCount > 0 {
+                // New row inserted — add FTS entry
+                let emailId = db.lastInsertedRowID
+                try db.execute(
+                    sql: """
+                        INSERT INTO email_fts(rowid, subject, body_text, sender_name, sender_email)
+                        VALUES (?, ?, ?, ?, ?)
+                    """,
+                    arguments: [emailId, record.subject, nil, record.senderName, record.senderEmail]
+                )
+                return emailId
+            } else {
+                // Row already existed (UID conflict) — return the existing row's ID
+                guard let uid = record.uid else { return 0 }
+                let existing = try EmailRecord
+                    .filter(
+                        Column("account_id") == record.accountId &&
+                        Column("folder") == record.folder &&
+                        Column("uid") == uid
+                    )
+                    .fetchOne(db)
+                return existing?.id ?? 0
+            }
         }
     }
 
@@ -263,6 +341,12 @@ actor MailStore {
                 .order(Column("date").desc)
                 .limit(limit, offset: offset)
                 .fetchAll(db)
+        }
+    }
+
+    func fetchEmailRecord(id: Int64) throws -> EmailRecord? {
+        try dbPool.read { db in
+            try EmailRecord.fetchOne(db, key: id)
         }
     }
 
@@ -341,12 +425,15 @@ actor MailStore {
 
     func listFolders(accountId: String) throws -> [(folder: String, unreadCount: Int)] {
         try dbPool.read { db in
+            // Join sync_state (all known folders) with emails (may be empty for Drafts/Spam etc.)
             let rows = try Row.fetchAll(db, sql: """
-                SELECT folder, COUNT(*) FILTER (WHERE is_read = 0) as unread_count
-                FROM emails
-                WHERE is_deleted = 0 AND account_id = ?
-                GROUP BY folder
-                ORDER BY folder
+                SELECT ss.folder,
+                       COALESCE(SUM(CASE WHEN e.is_read = 0 AND e.is_deleted = 0 THEN 1 ELSE 0 END), 0) AS unread_count
+                FROM sync_state ss
+                LEFT JOIN emails e ON e.folder = ss.folder AND e.account_id = ss.account_id
+                WHERE ss.account_id = ?
+                GROUP BY ss.folder
+                ORDER BY ss.folder
             """, arguments: [accountId])
             return rows.map { (folder: $0["folder"], unreadCount: $0["unread_count"]) }
         }

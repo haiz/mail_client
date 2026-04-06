@@ -69,16 +69,72 @@ final class MailStoreTests: XCTestCase {
         XCTAssertEqual(count, 1)
     }
 
-    func testDuplicateMessageIdRejected() async throws {
-        let record = makeEmail(messageId: "<dup@example.com>")
-        _ = try await store.insertEmail(record)
+    func testDuplicateUidIsIgnoredAndReturnsExistingId() async throws {
+        // Same (account_id, folder, uid) inserted twice must be silently ignored.
+        // The second call returns the existing row's ID.
+        let record = makeEmail(messageId: "<dup@example.com>", uid: 42)
+        let id1 = try await store.insertEmail(record)
+        XCTAssertGreaterThan(id1, 0)
 
-        do {
-            _ = try await store.insertEmail(record)
-            XCTFail("Should have thrown on duplicate message_id")
-        } catch {
-            // Expected: UNIQUE constraint violation
-        }
+        let id2 = try await store.insertEmail(record)
+        XCTAssertEqual(id1, id2, "Second insert for same UID must return the existing row ID")
+
+        let count = try await store.emailCount(accountId: testAccountId)
+        XCTAssertEqual(count, 1, "Only one row should exist")
+    }
+
+    func testCrossAccountSameMessageIdAllowed() async throws {
+        // The core bug: same message_id in two different accounts must both be stored.
+        // e.g. hai@caodev.top's Sent and cthai83@gmail.com's INBOX share a message_id.
+        let account2 = AccountRecord(
+            id: "acct2",
+            emailAddress: "other@example.com",
+            protocolType: "imap",
+            authType: "password",
+            keychainRef: "k2",
+            isDefault: false
+        )
+        try await store.insertAccount(account2)
+
+        let sent = makeEmail(messageId: "<shared@example.com>", accountId: testAccountId, uid: 10)
+        let inbox = makeEmail(messageId: "<shared@example.com>", accountId: "acct2", uid: 5)
+
+        let id1 = try await store.insertEmail(sent)
+        let id2 = try await store.insertEmail(inbox)
+
+        XCTAssertGreaterThan(id1, 0)
+        XCTAssertGreaterThan(id2, 0)
+        XCTAssertNotEqual(id1, id2, "Each account stores its own copy of the email")
+
+        let count1 = try await store.emailCount(accountId: testAccountId)
+        let count2 = try await store.emailCount(accountId: "acct2")
+        XCTAssertEqual(count1, 1)
+        XCTAssertEqual(count2, 1)
+    }
+
+    func testNilUidNeverConflicts() async throws {
+        // Emails with uid=nil are not covered by the partial index.
+        // Two nil-uid emails with the same message_id can coexist (edge case: demo/offline data).
+        let r1 = makeEmail(messageId: "<no-uid@example.com>", uid: nil)
+        let r2 = makeEmail(messageId: "<no-uid@example.com>", uid: nil)
+
+        let id1 = try await store.insertEmail(r1)
+        let id2 = try await store.insertEmail(r2)
+
+        XCTAssertGreaterThan(id1, 0)
+        XCTAssertGreaterThan(id2, 0)
+        // Both rows stored — no UID to deduplicate on
+    }
+
+    func testSameMessageIdInDifferentFoldersAllowed() async throws {
+        // Gmail multi-label model: same message can appear in INBOX and a label folder
+        let inboxRecord = makeEmail(messageId: "<multi@example.com>", folder: "INBOX")
+        let labelRecord = makeEmail(messageId: "<multi@example.com>", folder: "Work")
+        let id1 = try await store.insertEmail(inboxRecord)
+        let id2 = try await store.insertEmail(labelRecord)
+        XCTAssertGreaterThan(id1, 0)
+        XCTAssertGreaterThan(id2, 0)
+        XCTAssertNotEqual(id1, id2)
     }
 
     // MARK: - Search Tests
@@ -241,11 +297,13 @@ final class MailStoreTests: XCTestCase {
         messageId: String,
         subject: String? = "Test Subject",
         senderName: String? = nil,
-        accountId: String? = nil
+        accountId: String? = nil,
+        folder: String = "INBOX",
+        uid: Int? = nil
     ) -> EmailRecord {
-        EmailRecord(
+        var record = EmailRecord(
             messageId: messageId,
-            folder: "INBOX",
+            folder: folder,
             senderEmail: "sender@example.com",
             subject: subject,
             date: Int(Date().timeIntervalSince1970),
@@ -255,5 +313,7 @@ final class MailStoreTests: XCTestCase {
             hasAttachments: false,
             accountId: accountId ?? testAccountId
         )
+        record.uid = uid
+        return record
     }
 }
