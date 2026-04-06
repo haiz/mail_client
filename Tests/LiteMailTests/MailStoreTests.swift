@@ -124,6 +124,8 @@ final class MailStoreTests: XCTestCase {
         XCTAssertGreaterThan(id1, 0)
         XCTAssertGreaterThan(id2, 0)
         // Both rows stored — no UID to deduplicate on
+        let count = try await store.emailCount(accountId: testAccountId)
+        XCTAssertEqual(count, 2, "Both nil-uid rows should be stored independently")
     }
 
     func testSameMessageIdInDifferentFoldersAllowed() async throws {

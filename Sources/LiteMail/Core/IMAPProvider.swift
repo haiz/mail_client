@@ -259,7 +259,14 @@ actor IMAPProvider: MailProvider {
 
     func fetchMessageBody(messageRef: String) async throws -> ProviderMessageBody {
         let imap = try await getIMAP()
-        let uid = Self.parseUidRef(messageRef)
+        let (folder, uid) = Self.parseFolderAndUidRef(messageRef)
+
+        // Select the correct mailbox before fetching by UID.
+        // Without this, IMAP fetches from whichever folder is currently selected
+        // (typically INBOX after sync), returning wrong/missing content for Sent, etc.
+        if let folder {
+            _ = try await imap.selectMailbox(folder)
+        }
 
         guard let info = try await imap.fetchMessageInfo(for: uid) else {
             throw IMAPProviderError.messageNotFound
@@ -337,15 +344,28 @@ actor IMAPProvider: MailProvider {
             subject: message.subject,
             textBody: message.bodyText
         )
-        try? await saveSentCopy(email: email)
+        try? await saveSentCopy(email: email, message: message)
     }
 
-    /// Appends a sent message to the Sent IMAP folder.
-    /// Creates the folder first if it does not exist.
-    private func saveSentCopy(email: Email) async throws {
+    /// Appends a sent message to the Sent IMAP folder, then immediately writes
+    /// it to the local store so the Sent folder populates without waiting for
+    /// the next sync cycle.
+    private func saveSentCopy(email: Email, message: OutgoingMessage) async throws {
         let imap = try await getIMAP()
         let sentFolder = try await resolveSentFolder(imap: imap)
-        _ = try await imap.append(email: email, to: sentFolder, flags: [.seen])
+        let result = try await imap.append(email: email, to: sentFolder, flags: [.seen])
+
+        // Use the server-assigned UID to fetch the real MessageInfo (includes the
+        // Message-ID assigned by the server). This lets us write a properly keyed
+        // EmailRecord so subsequent incremental syncs deduplicate correctly.
+        guard let uid = result.firstUID else { return }
+        _ = try await imap.selectMailbox(sentFolder)
+        guard let info = try await imap.fetchMessageInfo(for: uid) else { return }
+
+        let record = Self.toEmailRecord(info, folder: sentFolder, accountId: accountId)
+        if let emailId = try? await store.insertEmail(record) {
+            try? await store.insertBody(emailId: emailId, text: message.bodyText, html: message.bodyHtml)
+        }
     }
 
     /// Returns the name of the Sent folder, creating it if it doesn't exist.
@@ -400,6 +420,7 @@ actor IMAPProvider: MailProvider {
                     try await smtp.sendEmail(email)
                     once.resume(continuation, with: .success(()))
                 } catch {
+                    print("[SMTP] send failed: \(error)")
                     once.resume(continuation, with: .failure(error))
                 }
             }
@@ -419,7 +440,7 @@ actor IMAPProvider: MailProvider {
         do {
             let message = try await imap.fetchMessage(from: info)
             if let messageIdStr = info.messageId?.description,
-               let id = try await store.findEmailId(byMessageId: messageIdStr) {
+               let id = try await store.findEmailId(byMessageId: messageIdStr, accountId: accountId) {
                 try await store.insertBody(emailId: id, text: message.textBody, html: message.htmlBody)
             }
         } catch {
@@ -478,6 +499,20 @@ actor IMAPProvider: MailProvider {
             return UID(val)
         }
         return UID(1) // fallback
+    }
+
+    /// Parse extended ref format "folder:<name>:uid:<N>" used when folder context is needed.
+    /// Falls back to plain "uid:<N>" for backward compatibility.
+    private static func parseFolderAndUidRef(_ ref: String) -> (folder: String?, uid: UID) {
+        if ref.hasPrefix("folder:"), let uidRange = ref.range(of: ":uid:") {
+            let folderStart = ref.index(ref.startIndex, offsetBy: "folder:".count)
+            let folder = String(ref[folderStart..<uidRange.lowerBound])
+            let uidStr = String(ref[uidRange.upperBound...])
+            if let val = UInt32(uidStr) {
+                return (folder: folder, uid: UID(val))
+            }
+        }
+        return (folder: nil, uid: parseUidRef(ref))
     }
 
     private static func detectRole(_ name: String) -> FolderRole? {

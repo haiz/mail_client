@@ -159,7 +159,7 @@ actor JMAPProvider: MailProvider {
     func fetchMessageBody(messageRef: String) async throws -> ProviderMessageBody {
         // The body is already fetched with the email in JMAP (bodyValues)
         // For now, return what we have in the store
-        if let emailId = try await store.findEmailId(byMessageId: messageRef),
+        if let emailId = try await store.findEmailId(byMessageId: messageRef, accountId: accountId),
            let body = try await store.fetchBody(emailId: emailId) {
             return ProviderMessageBody(ref: messageRef, textBody: body.text, htmlBody: body.html)
         }

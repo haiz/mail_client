@@ -191,6 +191,7 @@ actor MailStore {
             // Recreate emails table without any UNIQUE constraint on message_id.
             // FK enforcement must be disabled while we drop and rename.
             try db.execute(sql: "PRAGMA foreign_keys = OFF")
+            defer { try? db.execute(sql: "PRAGMA foreign_keys = ON") }
             try db.execute(sql: """
                 CREATE TABLE emails_v5 (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -223,7 +224,6 @@ actor MailStore {
             try db.execute(sql: "DROP INDEX IF EXISTS idx_emails_uid")
             try db.execute(sql: "DROP TABLE emails")
             try db.execute(sql: "ALTER TABLE emails_v5 RENAME TO emails")
-            try db.execute(sql: "PRAGMA foreign_keys = ON")
 
             try db.create(index: "idx_emails_thread", on: "emails", columns: ["thread_id"])
             try db.create(index: "idx_emails_folder", on: "emails", columns: ["folder"])
@@ -298,8 +298,12 @@ actor MailStore {
                 )
                 return emailId
             } else {
-                // Row already existed (UID conflict) — return the existing row's ID
-                guard let uid = record.uid else { return 0 }
+                // Row already existed (UID conflict) — return the existing row's ID.
+                // Nil-uid rows are excluded from the partial index so they can never conflict.
+                guard let uid = record.uid else {
+                    assertionFailure("insertEmail: conflict without uid — partial index should not fire for nil-uid rows")
+                    return 0
+                }
                 let existing = try EmailRecord
                     .filter(
                         Column("account_id") == record.accountId &&
@@ -476,10 +480,12 @@ actor MailStore {
 
     // MARK: - Lookup
 
-    func findEmailId(byMessageId messageId: String) throws -> Int64? {
+    func findEmailId(byMessageId messageId: String, accountId: String) throws -> Int64? {
         try dbPool.read { db in
-            let row = try Row.fetchOne(db, sql: "SELECT id FROM emails WHERE message_id = ?", arguments: [messageId])
-            return row?["id"] as Int64?
+            let row = try Row.fetchOne(db,
+                sql: "SELECT id FROM emails WHERE message_id = ? AND account_id = ?",
+                arguments: [messageId, accountId])
+            return row.map { $0["id"] }
         }
     }
 
