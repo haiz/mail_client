@@ -61,8 +61,29 @@ All Core types are Swift `actor`s. GUI callbacks are dispatched on `MainActor`. 
 
 ## Tests
 
-- `Tests/LiteMailTests/MailStoreTests.swift` — schema, account lifecycle, email CRUD, search
-- `Tests/LiteMailTests/FTS5BenchmarkTests.swift` — full-text search performance
+- `Tests/LiteMailTests/` — Unit tests: schema, email CRUD, search, contacts, OAuth, config
+- `Tests/LiteMailIntegrationTests/` — Integration: AccountManager workflows with mock providers
+- `Tests/LiteMailProtocolTests/` — Protocol: IMAP against Docker GreenMail + real account smoke
+- `Tests/LiteMailGUITests/` — GUI: AppKit programmatic tests (sidebar, list, detail, composer, palette)
+
+```bash
+swift test --filter LiteMailTests               # Unit tests (~1s)
+swift test --filter LiteMailIntegrationTests     # Integration (~2s)
+swift test --filter LiteMailGUITests             # GUI (~5s)
+swift test --filter LiteMailProtocolTests        # Protocol / requires Docker (~30s)
+```
+
+### Docker (for protocol tests)
+```bash
+docker compose -f docker-compose.test.yml up -d   # Start GreenMail
+docker compose -f docker-compose.test.yml down     # Stop GreenMail
+```
+
+### Real account smoke tests
+```bash
+LITEMAIL_GMAIL_TEST=1 LITEMAIL_GMAIL_EMAIL=... LITEMAIL_GMAIL_PASSWORD=... swift test --filter GmailSmokeTests
+LITEMAIL_JMAP_TEST=1 LITEMAIL_JMAP_EMAIL=... LITEMAIL_JMAP_URL=... LITEMAIL_JMAP_TOKEN=... swift test --filter JMAPSmokeTests
+```
 ## Skill routing
 
 When the user's request matches an available skill, ALWAYS invoke it using the Skill
