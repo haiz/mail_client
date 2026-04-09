@@ -2,9 +2,9 @@ import Foundation
 
 enum DockerHelper {
 
-    static let imapHost = "127.0.0.1"
-    static let imapPort = 3143
-    static let smtpHost = "127.0.0.1"
+    static let imapHost = "localhost"
+    static let imapPort = 3993  // IMAPS (TLS) — SwiftMail requires TLS
+    static let smtpHost = "localhost"
     static let smtpPort = 3025
     static let testEmail = "test@localhost.com"
     static let testPassword = "password123"
@@ -17,8 +17,8 @@ enum DockerHelper {
 
         var addr = sockaddr_in()
         addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_port = UInt16(imapPort).bigEndian
-        addr.sin_addr.s_addr = inet_addr(imapHost)
+        addr.sin_port = UInt16(3993).bigEndian
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
 
         let result = withUnsafePointer(to: &addr) { ptr in
             ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in

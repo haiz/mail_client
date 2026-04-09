@@ -18,7 +18,7 @@ enum SMTPSeeder {
         var addr = sockaddr_in()
         addr.sin_family = sa_family_t(AF_INET)
         addr.sin_port = UInt16(port).bigEndian
-        addr.sin_addr.s_addr = inet_addr(host)
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
 
         let connectResult = withUnsafePointer(to: &addr) { ptr in
             ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in

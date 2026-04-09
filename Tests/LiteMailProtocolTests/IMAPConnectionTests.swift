@@ -28,7 +28,7 @@ final class IMAPConnectionTests: XCTestCase {
             isDefault: true
         )
 
-        authManager.storePassword(accountId: config.keychainRef, password: DockerHelper.testPassword)
+        authManager.storePassword(accountId: config.id, password: DockerHelper.testPassword)
         
 
         let provider = IMAPProvider(config: config, authManager: authManager, store: store)
@@ -62,7 +62,7 @@ final class IMAPConnectionTests: XCTestCase {
             isDefault: true
         )
 
-        authManager.storePassword(accountId: config.keychainRef, password: "wrong-password")
+        authManager.storePassword(accountId: config.id, password: "wrong-password")
         
 
         let provider = IMAPProvider(config: config, authManager: authManager, store: store)
@@ -95,7 +95,7 @@ final class IMAPConnectionTests: XCTestCase {
             isDefault: true
         )
 
-        authManager.storePassword(accountId: config.keychainRef, password: DockerHelper.testPassword)
+        authManager.storePassword(accountId: config.id, password: DockerHelper.testPassword)
         
 
         let provider = IMAPProvider(config: config, authManager: authManager, store: store)

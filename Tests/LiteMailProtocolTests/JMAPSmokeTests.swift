@@ -52,7 +52,7 @@ final class JMAPSmokeTests: XCTestCase {
             isDefault: true
         ))
 
-        authManager.storePassword(accountId: config.keychainRef, password: token)
+        authManager.storePassword(accountId: config.id, password: token)
         provider = JMAPProvider(config: config, authManager: authManager, store: store)
     }
 

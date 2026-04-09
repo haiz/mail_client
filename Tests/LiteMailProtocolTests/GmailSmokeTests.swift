@@ -54,7 +54,7 @@ final class GmailSmokeTests: XCTestCase {
             isDefault: true
         ))
 
-        authManager.storePassword(accountId: config.keychainRef, password: password)
+        authManager.storePassword(accountId: config.id, password: password)
         provider = IMAPProvider(config: config, authManager: authManager, store: store)
     }
 

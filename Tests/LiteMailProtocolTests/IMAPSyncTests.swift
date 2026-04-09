@@ -43,7 +43,7 @@ final class IMAPSyncTests: XCTestCase {
             isDefault: true
         ))
 
-        authManager.storePassword(accountId: config.keychainRef, password: DockerHelper.testPassword)
+        authManager.storePassword(accountId: config.id, password: DockerHelper.testPassword)
 
         provider = IMAPProvider(config: config, authManager: authManager, store: store)
         try await provider.connect()
