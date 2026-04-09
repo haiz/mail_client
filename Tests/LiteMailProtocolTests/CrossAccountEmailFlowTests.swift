@@ -217,6 +217,8 @@ final class CrossAccountEmailFlowTests: XCTestCase {
     // MARK: - Helpers
 
     /// Poll for an email with a given subject. Syncs every 10s up to timeout.
+    /// Checks INBOX first, then Spam/Junk folders (emails from low-reputation
+    /// domains may be classified as spam by Gmail).
     private func pollForEmail(
         store: MailStore,
         provider: IMAPProvider,
@@ -224,23 +226,30 @@ final class CrossAccountEmailFlowTests: XCTestCase {
         subject: String,
         timeoutSeconds: Int
     ) async throws -> EmailRecord? {
+        let foldersToCheck = [
+            "INBOX",
+            "[Gmail]/Spam", "[Google Mail]/Spam", "Spam", "Junk",
+        ]
         let startTime = Date()
         while Date().timeIntervalSince(startTime) < Double(timeoutSeconds) {
-            // Use initialSync (more robust — handles unknown folders gracefully)
             do {
                 try await provider.performInitialSync()
             } catch {
                 // Sync errors are non-fatal for polling
             }
 
-            let headers = try await store.fetchHeaders(
-                accountId: accountId, folder: "INBOX", offset: 0, limit: 500
-            )
-            if let found = headers.first(where: { $0.subject == subject }) {
-                return found
+            for folder in foldersToCheck {
+                let headers = try await store.fetchHeaders(
+                    accountId: accountId, folder: folder, offset: 0, limit: 500
+                )
+                if let found = headers.first(where: { $0.subject == subject }) {
+                    if folder != "INBOX" {
+                        print("[pollForEmail] Found in '\(folder)' instead of INBOX (likely spam-classified)")
+                    }
+                    return found
+                }
             }
 
-            // Wait 10s before retrying
             try await Task.sleep(nanoseconds: 10_000_000_000)
         }
         return nil
