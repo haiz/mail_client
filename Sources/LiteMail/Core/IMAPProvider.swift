@@ -83,7 +83,7 @@ actor IMAPProvider: MailProvider {
     // MARK: - Sync
 
     func performInitialSync() async throws {
-        let imap = try await getIMAP()
+        var imap = try await getIMAP()
         let folders = try await listFolders()
 
         for folder in folders where !Self.isSkippedFolder(folder.id) {
@@ -94,31 +94,42 @@ actor IMAPProvider: MailProvider {
                 // internal PLAIN re-auth failed), clear imapServer so the next call to
                 // getIMAP() reconnects via connect() which has the PLAIN→LOGIN fallback.
                 imapServer = nil
+                // Reconnect so subsequent folders can still be synced.
+                imap = try await getIMAP()
             }
         }
     }
 
     func performIncrementalSync() async throws {
-        let imap = try await getIMAP()
+        var imap = try await getIMAP()
         let folders = try await listFolders()
 
         for folder in folders where !Self.isSkippedFolder(folder.id) {
             do {
                 try await incrementalSyncFolder(imap: imap, folderId: folder.id)
             } catch {
-                // Same as above: clear stale connection on any per-folder failure.
+                // Same as above: clear stale connection on any per-folder failure,
+                // then reconnect for remaining folders.
                 imapServer = nil
+                imap = try await getIMAP()
             }
         }
     }
 
     /// Returns true for Gmail virtual folders that duplicate emails found in real folders.
     /// Syncing them would store the same messages twice under different folder names.
+    /// Also skips namespace-only entries like "[Gmail]" / "[Google Mail]" which are not
+    /// real mailboxes and cause SELECT failures.
     private static func isSkippedFolder(_ folderId: String) -> Bool {
         let skipped: Set<String> = [
+            "[Gmail]",
+            "[Google Mail]",
             "[Gmail]/All Mail",
             "[Gmail]/Important",
-            "[Gmail]/Starred",   // also appears in INBOX with \Flagged
+            "[Gmail]/Starred",
+            "[Google Mail]/All Mail",
+            "[Google Mail]/Important",
+            "[Google Mail]/Starred",
         ]
         return skipped.contains(folderId)
     }
@@ -134,7 +145,9 @@ actor IMAPProvider: MailProvider {
 
         for info in headers {
             let record = Self.toEmailRecord(info, folder: folderId, accountId: accountId)
-            _ = try? await store.insertEmail(record)
+            if let emailId = try? await store.insertEmail(record) {
+                await storeAttachmentMetadata(info: info, emailId: emailId)
+            }
         }
 
         // Bodies are fetched on-demand when the user opens a message (fetchMessageBody).
@@ -179,7 +192,9 @@ actor IMAPProvider: MailProvider {
 
         for info in newHeaders {
             let record = Self.toEmailRecord(info, folder: folderId, accountId: accountId)
-            _ = try? await store.insertEmail(record)
+            if let emailId = try? await store.insertEmail(record) {
+                await storeAttachmentMetadata(info: info, emailId: emailId)
+            }
             await fetchAndStoreBody(imap: imap, info: info)
         }
 
@@ -214,6 +229,11 @@ actor IMAPProvider: MailProvider {
     }
 
     // MARK: - Folders
+
+    func createFolder(name: String) async throws {
+        let imap = try await getIMAP()
+        try await imap.createMailbox(name)
+    }
 
     func listFolders() async throws -> [ProviderFolder] {
         let imap = try await getIMAP()
@@ -279,19 +299,35 @@ actor IMAPProvider: MailProvider {
     // MARK: - Actions
 
     func markRead(messageRef: String, read: Bool) async throws {
-        // Store-level action (IMAP flag sync deferred)
+        let imap = try await getIMAP()
+        let (folder, uid) = Self.parseFolderAndUidRef(messageRef)
+        if let folder { _ = try await imap.selectMailbox(folder) }
+        let uidSet = MessageIdentifierSet<UID>(uid)
+        try await imap.store(flags: [.seen], on: uidSet, operation: read ? .add : .remove)
     }
 
     func markStarred(messageRef: String, starred: Bool) async throws {
-        // Store-level action
+        let imap = try await getIMAP()
+        let (folder, uid) = Self.parseFolderAndUidRef(messageRef)
+        if let folder { _ = try await imap.selectMailbox(folder) }
+        let uidSet = MessageIdentifierSet<UID>(uid)
+        try await imap.store(flags: [.flagged], on: uidSet, operation: starred ? .add : .remove)
     }
 
     func moveMessage(messageRef: String, toFolderId: String) async throws {
-        // Store-level action
+        let imap = try await getIMAP()
+        let (folder, uid) = Self.parseFolderAndUidRef(messageRef)
+        if let folder { _ = try await imap.selectMailbox(folder) }
+        try await imap.move(message: uid, to: toFolderId)
     }
 
     func deleteMessage(messageRef: String) async throws {
-        // Store-level action (IMAP flag + expunge)
+        let imap = try await getIMAP()
+        let (folder, uid) = Self.parseFolderAndUidRef(messageRef)
+        if let folder { _ = try await imap.selectMailbox(folder) }
+        let uidSet = MessageIdentifierSet<UID>(uid)
+        try await imap.store(flags: [.deleted], on: uidSet, operation: .add)
+        try await imap.expunge()
     }
 
     func fetchAttachment(messageRef: String, partId: String) async throws -> Data {
@@ -337,12 +373,12 @@ actor IMAPProvider: MailProvider {
         // After SMTP succeeds, save a copy to the Sent folder via IMAP APPEND.
         // Non-fatal: a failed append should not roll back a successful send.
         let email = Email(
-            senderName: nil,
-            senderAddress: from,
-            recipientNames: nil,
-            recipientAddresses: message.to,
+            sender: EmailAddress(name: nil, address: from),
+            recipients: message.to.map { EmailAddress(name: nil, address: $0) },
+            ccRecipients: message.cc.map { EmailAddress(name: nil, address: $0) },
             subject: message.subject,
-            textBody: message.bodyText
+            textBody: message.bodyText,
+            htmlBody: message.bodyHtml
         )
         try? await saveSentCopy(email: email, message: message)
     }
@@ -409,13 +445,17 @@ actor IMAPProvider: MailProvider {
                         break
                     }
 
+                    let swiftMailAttachments: [Attachment]? = message.attachments.isEmpty ? nil :
+                        message.attachments.map { Attachment(filename: $0.filename, mimeType: $0.mimeType, data: $0.data) }
                     let email = Email(
-                        senderName: nil,
-                        senderAddress: from,
-                        recipientNames: nil,
-                        recipientAddresses: message.to,
+                        sender: EmailAddress(name: nil, address: from),
+                        recipients: message.to.map { EmailAddress(name: nil, address: $0) },
+                        ccRecipients: message.cc.map { EmailAddress(name: nil, address: $0) },
+                        bccRecipients: message.bcc.map { EmailAddress(name: nil, address: $0) },
                         subject: message.subject,
-                        textBody: message.bodyText
+                        textBody: message.bodyText,
+                        htmlBody: message.bodyHtml,
+                        attachments: swiftMailAttachments
                     )
                     try await smtp.sendEmail(email)
                     once.resume(continuation, with: .success(()))
@@ -435,6 +475,24 @@ actor IMAPProvider: MailProvider {
     }
 
     // MARK: - Helpers
+
+    /// Extract attachment metadata from MessageInfo parts and store in the DB.
+    private func storeAttachmentMetadata(info: MessageInfo, emailId: Int64) async {
+        let attachmentParts = info.parts.filter { $0.disposition == "attachment" }
+        guard !attachmentParts.isEmpty else { return }
+
+        let records = attachmentParts.map { part in
+            AttachmentRecord(
+                emailId: emailId,
+                partId: part.section.description,
+                filename: part.filename ?? part.suggestedFilename,
+                mimeType: part.contentType,
+                sizeBytes: part.data?.count,
+                contentId: part.contentId
+            )
+        }
+        try? await store.insertAttachments(records)
+    }
 
     private func fetchAndStoreBody(imap: IMAPServer, info: MessageInfo) async {
         do {
