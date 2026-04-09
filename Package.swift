@@ -34,5 +34,30 @@ let package = Package(
             ],
             path: "Tests/LiteMailTests"
         ),
+        .testTarget(
+            name: "LiteMailIntegrationTests",
+            dependencies: [
+                "LiteMail",
+                .product(name: "GRDB", package: "GRDB.swift"),
+            ],
+            path: "Tests/LiteMailIntegrationTests"
+        ),
+        .testTarget(
+            name: "LiteMailProtocolTests",
+            dependencies: [
+                "LiteMail",
+                .product(name: "GRDB", package: "GRDB.swift"),
+                .product(name: "SwiftMail", package: "SwiftMail"),
+            ],
+            path: "Tests/LiteMailProtocolTests"
+        ),
+        .testTarget(
+            name: "LiteMailGUITests",
+            dependencies: [
+                "LiteMail",
+                .product(name: "GRDB", package: "GRDB.swift"),
+            ],
+            path: "Tests/LiteMailGUITests"
+        ),
     ]
 )
