@@ -158,17 +158,26 @@ final class MainWindowController: NSObject {
             messageListView.selectPreviousRow()
             return nil
         case "e":
-            if let selected = messageListView.selectedHeader {
+            let checkedE = Array(messageListView.checkedIds)
+            if !checkedE.isEmpty {
+                onAction?(.batchArchive(checkedE))
+            } else if let selected = messageListView.selectedHeader {
                 onAction?(.archive(selected.id))
             }
             return nil
         case "s":
-            if let selected = messageListView.selectedHeader {
+            let checkedS = Array(messageListView.checkedIds)
+            if !checkedS.isEmpty {
+                onAction?(.batchToggleStar(checkedS))
+            } else if let selected = messageListView.selectedHeader {
                 onAction?(.toggleStar(selected.id))
             }
             return nil
         case "r":
-            if let selected = messageListView.selectedHeader {
+            let checkedR = Array(messageListView.checkedIds)
+            if !checkedR.isEmpty {
+                onAction?(.batchMarkRead(checkedR))
+            } else if let selected = messageListView.selectedHeader {
                 onAction?(.markRead(selected.id))
             }
             return nil
@@ -179,6 +188,17 @@ final class MainWindowController: NSObject {
             return nil
         default:
             break
+        }
+
+        // Delete/Backspace → delete checked or selected
+        if event.keyCode == 51 {
+            let checkedDel = Array(messageListView.checkedIds)
+            if !checkedDel.isEmpty {
+                onAction?(.batchDelete(checkedDel))
+            } else if let selected = messageListView.selectedHeader {
+                onAction?(.delete(selected.id))
+            }
+            return nil
         }
 
         // Escape → clear detail view
@@ -239,4 +259,10 @@ enum MailAction {
     case forward(Int64)
     case search(String)
     case refresh
+    case batchDelete([Int64])
+    case batchArchive([Int64])
+    case batchMarkRead([Int64])
+    case batchMarkUnread([Int64])
+    case batchToggleStar([Int64])
+    case batchMove([Int64], String)
 }

@@ -1,5 +1,12 @@
 import AppKit
 
+/// A group of messages in the same thread (for collapsed thread display).
+struct ThreadGroup {
+    let primaryHeader: EmailHeader
+    let count: Int
+    let threadId: String?
+}
+
 /// Message list with NSTableView, lazy row loading from GRDB, thread grouping.
 /// View-based table with cell recycling for minimal memory usage.
 final class MessageListView: NSObject {
@@ -11,11 +18,18 @@ final class MessageListView: NSObject {
 
     var onMessageSelected: ((EmailHeader) -> Void)?
     var onSearchChanged: ((String) -> Void)?
+    var onCheckedIdsChanged: ((Set<Int64>) -> Void)?
 
+    /// Set of email IDs the user has checked via checkboxes.
+    private(set) var checkedIds: Set<Int64> = []
+
+    /// Thread groups for display. Each group shows the latest message with a count.
+    private(set) var threadGroups: [ThreadGroup] = []
+    /// Flat message list (pre-grouping).
     private(set) var messages: [EmailHeader] = []
     private(set) var selectedHeader: EmailHeader? {
         didSet {
-            if let header = selectedHeader {
+            if let header = selectedHeader, header.id != oldValue?.id {
                 onMessageSelected?(header)
             }
         }
@@ -76,15 +90,23 @@ final class MessageListView: NSObject {
     }
 
     func update(messages: [EmailHeader]) {
+        let previouslySelectedId = selectedHeader?.id
         self.messages = messages
+        self.threadGroups = Self.groupByThread(messages)
         tableView.reloadData()
-        if !messages.isEmpty {
+
+        // Restore selection to the same email, or fall back to row 0
+        if let prevId = previouslySelectedId,
+           let idx = threadGroups.firstIndex(where: { $0.primaryHeader.id == prevId }) {
+            tableView.selectRowIndexes(IndexSet(integer: idx), byExtendingSelection: false)
+            tableView.scrollRowToVisible(idx)
+        } else if !threadGroups.isEmpty {
             tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
         }
     }
 
     func selectNextRow() {
-        let next = min(tableView.selectedRow + 1, messages.count - 1)
+        let next = min(tableView.selectedRow + 1, threadGroups.count - 1)
         guard next >= 0 else { return }
         tableView.selectRowIndexes(IndexSet(integer: next), byExtendingSelection: false)
         tableView.scrollRowToVisible(next)
@@ -96,6 +118,44 @@ final class MessageListView: NSObject {
         tableView.scrollRowToVisible(prev)
     }
 
+    /// Clear all checkbox selections.
+    func clearCheckedIds() {
+        checkedIds = []
+        tableView.reloadData()
+        onCheckedIdsChanged?(checkedIds)
+    }
+
+    /// Toggle the checked state of a single email row.
+    func toggleChecked(emailId: Int64) {
+        if checkedIds.contains(emailId) {
+            checkedIds.remove(emailId)
+        } else {
+            checkedIds.insert(emailId)
+        }
+        tableView.reloadData()
+        onCheckedIdsChanged?(checkedIds)
+    }
+
+    /// Group messages by threadId. Messages without a threadId get their own group.
+    private static func groupByThread(_ messages: [EmailHeader]) -> [ThreadGroup] {
+        var groups: [String: [EmailHeader]] = [:]
+        var order: [String] = []
+
+        for msg in messages {
+            let key = msg.threadId ?? "solo_\(msg.id)"
+            if groups[key] == nil {
+                order.append(key)
+            }
+            groups[key, default: []].append(msg)
+        }
+
+        return order.compactMap { key -> ThreadGroup? in
+            guard let msgs = groups[key], let latest = msgs.first else { return nil }
+            // Messages are already sorted by date desc from the store
+            return ThreadGroup(primaryHeader: latest, count: msgs.count, threadId: latest.threadId)
+        }
+    }
+
     @objc private func searchFieldChanged() {
         onSearchChanged?(searchField.stringValue)
     }
@@ -105,7 +165,16 @@ final class MessageListView: NSObject {
 
 extension MessageListView: NSTableViewDataSource {
     func numberOfRows(in tableView: NSTableView) -> Int {
-        messages.count
+        threadGroups.count
+    }
+
+    // MARK: - Drag source
+
+    func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> (any NSPasteboardWriting)? {
+        guard row < threadGroups.count else { return nil }
+        let item = NSPasteboardItem()
+        item.setString("\(threadGroups[row].primaryHeader.id)", forType: .string)
+        return item
     }
 }
 
@@ -113,8 +182,8 @@ extension MessageListView: NSTableViewDataSource {
 
 extension MessageListView: NSTableViewDelegate {
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        guard row < messages.count else { return nil }
-        let msg = messages[row]
+        guard row < threadGroups.count else { return nil }
+        let group = threadGroups[row]
 
         let cellId = NSUserInterfaceItemIdentifier("MessageCell")
         let cell: MessageCellView
@@ -126,17 +195,26 @@ extension MessageListView: NSTableViewDelegate {
             cell.identifier = cellId
         }
 
-        cell.configure(with: msg)
+        let emailId = group.primaryHeader.id
+        cell.configure(
+            with: group.primaryHeader,
+            threadCount: group.count,
+            isChecked: checkedIds.contains(emailId),
+            showCheckboxes: !checkedIds.isEmpty
+        )
+        cell.onCheckboxToggled = { [weak self] in
+            self?.toggleChecked(emailId: emailId)
+        }
         return cell
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
         let row = tableView.selectedRow
-        guard row >= 0, row < messages.count else {
+        guard row >= 0, row < threadGroups.count else {
             selectedHeader = nil
             return
         }
-        selectedHeader = messages[row]
+        selectedHeader = threadGroups[row].primaryHeader
     }
 }
 
@@ -157,6 +235,11 @@ private final class MessageCellView: NSTableCellView {
     private let dateLabel = NSTextField(labelWithString: "")
     private let starIcon = NSImageView()
     private let unreadDot = NSView()
+    private let threadBadge = NSTextField(labelWithString: "")
+    private let checkbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
+
+    /// Called when the user clicks the checkbox.
+    var onCheckboxToggled: (() -> Void)?
 
     private static let dateFormatter: DateFormatter = {
         let f = DateFormatter()
@@ -177,13 +260,27 @@ private final class MessageCellView: NSTableCellView {
     }
 
     private func setupViews() {
-        for v in [senderLabel, subjectLabel, dateLabel, starIcon, unreadDot] {
+        for v in [checkbox, senderLabel, subjectLabel, dateLabel, starIcon, unreadDot, threadBadge] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
 
+        // Checkbox — hidden until multi-select is active
+        checkbox.isHidden = true
+        checkbox.target = self
+        checkbox.action = #selector(checkboxClicked)
+
         senderLabel.font = .systemFont(ofSize: 13, weight: .semibold)
         senderLabel.lineBreakMode = .byTruncatingTail
+
+        // Thread count badge
+        threadBadge.font = .systemFont(ofSize: 10, weight: .medium)
+        threadBadge.textColor = .white
+        threadBadge.alignment = .center
+        threadBadge.wantsLayer = true
+        threadBadge.layer?.backgroundColor = NSColor.secondaryLabelColor.cgColor
+        threadBadge.layer?.cornerRadius = 7
+        threadBadge.isHidden = true
 
         subjectLabel.font = .systemFont(ofSize: 12)
         subjectLabel.textColor = .secondaryLabelColor
@@ -202,14 +299,25 @@ private final class MessageCellView: NSTableCellView {
         unreadDot.layer?.cornerRadius = 4
 
         NSLayoutConstraint.activate([
-            unreadDot.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
+            // Checkbox at the left edge
+            checkbox.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
+            checkbox.centerYAnchor.constraint(equalTo: centerYAnchor),
+
+            // Unread dot anchored off the checkbox trailing edge
+            unreadDot.leadingAnchor.constraint(equalTo: checkbox.trailingAnchor, constant: 2),
             unreadDot.centerYAnchor.constraint(equalTo: senderLabel.centerYAnchor),
             unreadDot.widthAnchor.constraint(equalToConstant: 8),
             unreadDot.heightAnchor.constraint(equalToConstant: 8),
 
             senderLabel.topAnchor.constraint(equalTo: topAnchor, constant: 8),
             senderLabel.leadingAnchor.constraint(equalTo: unreadDot.trailingAnchor, constant: 6),
-            senderLabel.trailingAnchor.constraint(lessThanOrEqualTo: dateLabel.leadingAnchor, constant: -8),
+
+            threadBadge.centerYAnchor.constraint(equalTo: senderLabel.centerYAnchor),
+            threadBadge.leadingAnchor.constraint(equalTo: senderLabel.trailingAnchor, constant: 4),
+            threadBadge.widthAnchor.constraint(greaterThanOrEqualToConstant: 18),
+            threadBadge.heightAnchor.constraint(equalToConstant: 14),
+            threadBadge.trailingAnchor.constraint(lessThanOrEqualTo: dateLabel.leadingAnchor, constant: -8),
+            senderLabel.trailingAnchor.constraint(lessThanOrEqualTo: threadBadge.leadingAnchor, constant: -4),
 
             dateLabel.topAnchor.constraint(equalTo: topAnchor, constant: 8),
             dateLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
@@ -225,7 +333,11 @@ private final class MessageCellView: NSTableCellView {
         ])
     }
 
-    func configure(with header: EmailHeader) {
+    @objc private func checkboxClicked() {
+        onCheckboxToggled?()
+    }
+
+    func configure(with header: EmailHeader, threadCount: Int = 1, isChecked: Bool = false, showCheckboxes: Bool = false) {
         senderLabel.stringValue = header.senderName ?? header.senderEmail
         senderLabel.font = header.isRead
             ? .systemFont(ofSize: 13)
@@ -239,5 +351,16 @@ private final class MessageCellView: NSTableCellView {
 
         starIcon.isHidden = !header.isStarred
         unreadDot.isHidden = header.isRead
+
+        if threadCount > 1 {
+            threadBadge.isHidden = false
+            threadBadge.stringValue = "\(threadCount)"
+        } else {
+            threadBadge.isHidden = true
+        }
+
+        // Checkbox visibility: show when any row is checked, hide when none are
+        checkbox.isHidden = !showCheckboxes
+        checkbox.state = isChecked ? .on : .off
     }
 }

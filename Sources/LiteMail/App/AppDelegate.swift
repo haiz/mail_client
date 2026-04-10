@@ -9,6 +9,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var addAccountSheet: AddAccountSheet?
     private var composerWindow: ComposerWindow?
     private var contactsStore: ContactsStore?
+    private var activatedAccountIds: Set<String> = []
+    private var displayedEmailId: Int64?
+    private var isSyncing = false
+    private var syncStartTime: Date?
+    private var syncBaseEmailCount = 0
+    private var syncProgressTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let wc = MainWindowController()
@@ -17,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         wc.onFolderSelected = { [weak self] accountId, folder in
             self?.currentAccountId = accountId
             self?.currentFolder = folder
+            self?.displayedEmailId = nil
             self?.loadMessages()
         }
         wc.onMessageSelected = { [weak self] header in
@@ -36,6 +43,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         wc.sidebarView.onRefresh = { [weak self] in
             self?.syncNow()
+        }
+        wc.sidebarView.onMoveToFolder = { [weak self] emailId, folderId in
+            self?.handleAction(.moveToFolder(emailId, folderId))
         }
 
         setupMainMenu()
@@ -69,6 +79,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let fileMenuItem = NSMenuItem()
         let fileMenu = NSMenu(title: "File")
         fileMenu.addItem(withTitle: "New Message", action: #selector(composeNewMessage), keyEquivalent: "n")
+        fileMenu.addItem(.separator())
+        fileMenu.addItem(withTitle: "Print...", action: #selector(printEmail), keyEquivalent: "p")
+        fileMenu.addItem(withTitle: "Export as .eml...", action: #selector(exportEml), keyEquivalent: "e")
+        fileMenu.items.last?.keyEquivalentModifierMask = [.command, .shift]
         fileMenu.addItem(.separator())
         fileMenu.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         fileMenuItem.submenu = fileMenu
@@ -117,13 +131,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     try await Self.seedDemoData(store: store)
                     currentAccountId = "default"
                 } else {
-                    currentAccountId = accounts.first(where: \.isDefault)?.id ?? accounts.first?.id
+                    let saved = UserDefaults.standard.string(forKey: "lastActiveAccountId")
+                    let savedExists = saved.map { id in accounts.contains(where: { $0.id == id }) } ?? false
+                    currentAccountId = savedExists ? saved : (accounts.first(where: \.isDefault)?.id ?? accounts.first?.id)
+                }
+                if let id = currentAccountId {
+                    activatedAccountIds.insert(id)
                 }
 
                 await MainActor.run {
                     self.loadSidebar()
                     self.loadMessages()
                     self.updateStatusBar()
+                    self.startPeriodicSyncLoop()
+                    self.windowController?.sidebarView.onAuthErrorFix = { [weak self] (_: String) in self?.openSettings() }
+                    // Kick off an immediate sync so the user sees emails on launch
+                    if !accounts.isEmpty {
+                        Task { await self.performSyncCycle() }
+                    }
                 }
             }
         } catch {
@@ -150,28 +175,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func loadMessageDetail(header: EmailHeader) {
         guard let accountManager else { return }
 
+        // Skip if already displaying this email (e.g. re-triggered by reloadData
+        // after markRead — reloadData clears selection to nil then restores it,
+        // which fires tableViewSelectionDidChange again for the same email).
+        guard header.id != displayedEmailId else { return }
+        displayedEmailId = header.id
+
+        // Show header immediately — body loads async below.
+        windowController?.detailView.display(header: header, body: nil, isLoading: true)
+
+        // Wire action buttons that don't need the body.
+        windowController?.detailView.onArchive = { [weak self] in
+            self?.handleAction(.archive(header.id))
+        }
+        windowController?.detailView.onDelete = { [weak self] in
+            self?.handleAction(.delete(header.id))
+        }
+        windowController?.detailView.onMove = { [weak self] folderId in
+            self?.handleAction(.moveToFolder(header.id, folderId))
+        }
+
+        // Fetch body, then mark as read AFTER.
+        // IMAP is a stateful single-connection protocol — concurrent provider
+        // calls (markRead + fetchBody) race on the socket and the body fetch
+        // fails silently. Keeping the original order (body first, markRead second)
+        // avoids the collision.
         Task { @MainActor in
             do {
                 let body = try await accountManager.fetchBody(emailId: header.id)
                 windowController?.detailView.display(header: header, body: body)
 
-                // Wire detail view action buttons
+                // Wire reply/forward (need body for compose window).
                 windowController?.detailView.onReply = { [weak self] in
                     self?.openComposer(mode: .reply(to: header, body: body))
                 }
                 windowController?.detailView.onForward = { [weak self] in
                     self?.openComposer(mode: .forward(original: header, body: body))
                 }
-                windowController?.detailView.onArchive = { [weak self] in
-                    self?.handleAction(.archive(header.id))
-                }
-                windowController?.detailView.onDelete = { [weak self] in
-                    self?.handleAction(.delete(header.id))
+
+                // Populate available folders for the Move menu
+                if let accountId = self.currentAccountId,
+                   let folders = try? await accountManager.listFolders(accountId: accountId) {
+                    windowController?.detailView.availableFolders = folders.filter { $0.id != header.folder }
                 }
 
+                // Load and display attachments
+                if header.hasAttachments {
+                    let attachments = try await accountManager.listAttachments(emailId: header.id)
+                    windowController?.detailView.displayAttachments(attachments)
+                    windowController?.detailView.onDownloadAttachment = { [weak self] att in
+                        self?.downloadAttachment(emailId: header.id, attachment: att)
+                    }
+                } else {
+                    windowController?.detailView.displayAttachments([])
+                }
+
+                // Mark as read after body is displayed (fire-and-forget).
                 if !header.isRead {
-                    try await accountManager.markRead(emailId: header.id, read: true)
-                    loadMessages()
+                    Task { @MainActor [weak self] in
+                        try? await accountManager.markRead(emailId: header.id, read: true)
+                        self?.loadMessages()
+                    }
                 }
             } catch {
                 showError("Failed to load message: \(error.localizedDescription)")
@@ -223,9 +287,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 case .markUnread(let id) where id > 0:
                     try await accountManager.markRead(emailId: id, read: false)
                     loadMessages()
-                case .refresh:
-                    try await accountManager.syncAllAccounts()
+                case .moveToFolder(let id, let folder) where id > 0:
+                    try await accountManager.move(emailId: id, toFolder: folder)
                     loadMessages()
+                case .refresh:
+                    await performSyncCycle()
                 case .compose:
                     openComposer(mode: .compose)
                 case .reply(let id) where id > 0:
@@ -240,6 +306,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                 case .search(let query):
                     performSearch(query: query)
+                case .batchDelete(let ids) where !ids.isEmpty:
+                    try await accountManager.deleteBatch(emailIds: ids)
+                    windowController?.messageListView.clearCheckedIds()
+                    loadMessages()
+                case .batchArchive(let ids) where !ids.isEmpty:
+                    try await accountManager.archiveBatch(emailIds: ids)
+                    windowController?.messageListView.clearCheckedIds()
+                    loadMessages()
+                case .batchMarkRead(let ids) where !ids.isEmpty:
+                    try await accountManager.markReadBatch(emailIds: ids, read: true)
+                    windowController?.messageListView.clearCheckedIds()
+                    loadMessages()
+                case .batchMarkUnread(let ids) where !ids.isEmpty:
+                    try await accountManager.markReadBatch(emailIds: ids, read: false)
+                    windowController?.messageListView.clearCheckedIds()
+                    loadMessages()
+                case .batchToggleStar(let ids) where !ids.isEmpty:
+                    try await accountManager.markStarredBatch(emailIds: ids, starred: true)
+                    windowController?.messageListView.clearCheckedIds()
+                    loadMessages()
+                case .batchMove(let ids, let folder) where !ids.isEmpty:
+                    try await accountManager.moveBatch(emailIds: ids, toFolder: folder)
+                    windowController?.messageListView.clearCheckedIds()
+                    loadMessages()
                 default:
                     break
                 }
@@ -255,11 +345,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let composer = ComposerWindow(mode: mode)
         composer.contactsStore = contactsStore
         composer.accountId = currentAccountId
-        composer.onSend = { [weak self] message in
-            guard let self, let accountId = self.currentAccountId else { return }
-            self.composerWindow = nil  // Release after send
+
+        // Populate From selector with all accounts
+        Task { @MainActor in
+            if let accounts = try? await self.accountManager?.listAccounts() {
+                composer.setAccounts(
+                    accounts.map { (id: $0.id, email: $0.emailAddress) },
+                    selected: self.currentAccountId
+                )
+            }
+        }
+
+        composer.onSend = { [weak self, weak composer] message, completion in
+            guard let self else {
+                completion("No account selected.")
+                return
+            }
+            let accountId = composer?.selectedAccountId ?? self.currentAccountId
+            guard let accountId else {
+                completion("No account selected.")
+                return
+            }
             Task {
-                try? await self.accountManager?.send(message: message, fromAccountId: accountId)
+                do {
+                    try await self.accountManager?.send(message: message, fromAccountId: accountId)
+                    await MainActor.run {
+                        self.windowController?.statusBar.updateSyncStatus("Message sent")
+                        // completion(nil) must be called before composerWindow = nil.
+                        // The completion closure captures ComposerWindow via [weak self];
+                        // releasing composerWindow first deallocates it, making self nil
+                        // and leaving the window stuck in "Sending…" forever.
+                        completion(nil)
+                        self.composerWindow = nil
+                        // Sync so the Sent folder appears promptly
+                        Task { await self.performSyncCycle() }
+                    }
+                } catch {
+                    // Use full string description so NIOConnectionError shows its
+                    // connectionErrors details instead of the generic "error 1" NSError format.
+                    let detail = "\(error)"
+                    let friendly = detail.isEmpty ? error.localizedDescription : detail
+                    completion(friendly)
+                }
             }
         }
         self.composerWindow = composer  // Retain reference
@@ -270,10 +397,132 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func composeNewMessage() { openComposer(mode: .compose) }
 
+    @objc private func printEmail() {
+        windowController?.detailView.printEmail()
+    }
+
+    @objc private func exportEml() {
+        guard let accountManager,
+              let header = windowController?.messageListView.selectedHeader else { return }
+        Task { @MainActor in
+            do {
+                let body = try await accountManager.fetchBody(emailId: header.id)
+                let eml = Self.buildEml(header: header, body: body)
+                let panel = NSSavePanel()
+                panel.nameFieldStringValue = "\(header.subject ?? "email").eml"
+                panel.canCreateDirectories = true
+                if panel.runModal() == .OK, let url = panel.url {
+                    try eml.write(to: url, atomically: true, encoding: .utf8)
+                }
+            } catch {
+                showError("Export failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Build a basic RFC 822 .eml string from header + body.
+    private static func buildEml(header: EmailHeader, body: EmailBody?) -> String {
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss Z"
+        dateFormatter.locale = Locale(identifier: "en_US_POSIX")
+
+        var eml = "From: \(header.senderEmail)\r\n"
+        eml += "Date: \(dateFormatter.string(from: header.date))\r\n"
+        eml += "Subject: \(header.subject ?? "")\r\n"
+        eml += "Message-ID: <\(header.messageId)>\r\n"
+        eml += "MIME-Version: 1.0\r\n"
+
+        if let html = body?.htmlBody, !html.isEmpty {
+            eml += "Content-Type: text/html; charset=utf-8\r\n"
+            eml += "\r\n"
+            eml += html
+        } else {
+            eml += "Content-Type: text/plain; charset=utf-8\r\n"
+            eml += "\r\n"
+            eml += body?.textBody ?? ""
+        }
+        return eml
+    }
+
     @objc private func syncNow() {
         Task { @MainActor in
-            try? await accountManager?.syncAllAccounts()
-            loadMessages()
+            await performSyncCycle()
+        }
+    }
+
+    /// Runs one sync cycle: updates status bar, syncs all accounts, reloads UI.
+    @MainActor
+    private func performSyncCycle() async {
+        guard let accountManager, !isSyncing else { return }
+        isSyncing = true
+        syncStartTime = Date()
+        syncBaseEmailCount = (try? await accountManager.store.emailCount()) ?? 0
+
+        windowController?.statusBar.updateConnection(status: .syncing)
+        startSyncProgressTimer()
+
+        // Sync all accounts the user has visited this session.
+        for accountId in activatedAccountIds {
+            do {
+                try await accountManager.performIncrementalSync(accountId: accountId)
+                windowController?.sidebarView.setAuthError(for: accountId, hasError: false)
+            } catch {
+                if isAuthError(error) {
+                    windowController?.sidebarView.setAuthError(for: accountId, hasError: true)
+                }
+            }
+        }
+
+        stopSyncProgressTimer()
+        isSyncing = false
+        loadSidebar()
+        loadMessages()
+        updateStatusBar()
+
+        let fmt = DateFormatter()
+        fmt.timeStyle = .short
+        fmt.dateStyle = .none
+        let elapsed = Int(-(syncStartTime?.timeIntervalSinceNow ?? 0))
+        let finalCount = (try? await accountManager.store.emailCount()) ?? 0
+        let added = max(0, finalCount - syncBaseEmailCount)
+        let addedStr = added > 0 ? " · +\(Self.formatCount(added)) emails" : ""
+        windowController?.statusBar.updateSyncStatus("Synced \(fmt.string(from: Date())) (\(elapsed)s\(addedStr))")
+        windowController?.statusBar.updateConnection(status: .connected)
+        syncStartTime = nil
+    }
+
+    private func startSyncProgressTimer() {
+        syncProgressTimer?.invalidate()
+        syncProgressTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.isSyncing, let start = self.syncStartTime else { return }
+                let elapsed = Int(-start.timeIntervalSinceNow)
+                let current = (try? await self.accountManager?.store.emailCount()) ?? 0
+                let added = max(0, current - self.syncBaseEmailCount)
+                let addedStr = added > 0 ? " · +\(Self.formatCount(added)) emails" : ""
+                self.windowController?.statusBar.updateSyncStatus("Syncing… \(elapsed)s\(addedStr)")
+            }
+        }
+    }
+
+    private func stopSyncProgressTimer() {
+        syncProgressTimer?.invalidate()
+        syncProgressTimer = nil
+    }
+
+    private static func formatCount(_ n: Int) -> String {
+        if n >= 1_000_000 { return String(format: "%.1fM", Double(n) / 1_000_000) }
+        if n >= 1_000 { return String(format: "%.1fk", Double(n) / 1_000) }
+        return "\(n)"
+    }
+
+    /// Starts a background loop that syncs every 5 minutes.
+    private func startPeriodicSyncLoop() {
+        Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(300))
+                await performSyncCycle()
+            }
         }
     }
 
@@ -338,23 +587,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         group.cancelAll()
                     }
 
-                    // Step 4: Connection succeeded — run initial sync (30s timeout, non-blocking on failure)
-                    Task {
-                        try? await withThrowingTaskGroup(of: Void.self) { group in
-                            group.addTask { try await provider.performInitialSync() }
-                            group.addTask {
-                                try await Task.sleep(for: .seconds(30))
-                                throw AddAccountError.syncTimeout
-                            }
-                            try await group.next()
-                            group.cancelAll()
-                        }
-                        await MainActor.run {
-                            self.loadSidebar()
-                            self.loadMessages()
-                            self.updateStatusBar()
-                        }
-                    }
+                    // Step 4: Connection succeeded — run initial sync in background (no timeout)
+                    Task { await self.performSyncCycle() }
 
                     // Fire-and-forget contacts fetch for OAuth accounts (Gmail)
                     if config.authType == .oauth2, let contactsStore = self.contactsStore {
@@ -364,7 +598,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     await MainActor.run {
                         completion(nil) // Must call before releasing sheet
                         self.loadSidebar()
-                        self.loadMessages()
+                        self.switchAccount(config.id) // Switch to the newly added account
                         self.addAccountSheet = nil // Release after sheet dismisses
                     }
                 } catch {
@@ -440,18 +674,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func switchAccount(_ accountId: String) {
         currentAccountId = accountId
+        UserDefaults.standard.set(accountId, forKey: "lastActiveAccountId")
+        activatedAccountIds.insert(accountId)
         currentFolder = "INBOX"
+        displayedEmailId = nil
         loadFoldersForCurrentAccount()
         loadMessages()
+        Task { await performSyncCycle() }
     }
 
     private static func defaultFolders() -> [MailFolder] {
         [
-            MailFolder(id: "INBOX", name: "Inbox", unreadCount: 0),
-            MailFolder(id: "[Gmail]/Starred", name: "Starred", unreadCount: 0),
-            MailFolder(id: "[Gmail]/Sent Mail", name: "Sent", unreadCount: 0),
-            MailFolder(id: "[Gmail]/Drafts", name: "Drafts", unreadCount: 0),
-            MailFolder(id: "[Gmail]/Trash", name: "Trash", unreadCount: 0),
+            MailFolder(id: "INBOX", name: "Inbox", unreadCount: 0, role: .inbox),
+            MailFolder(id: "[Gmail]/Starred", name: "Starred", unreadCount: 0, role: .starred),
+            MailFolder(id: "[Gmail]/Sent Mail", name: "Sent", unreadCount: 0, role: .sent),
+            MailFolder(id: "[Gmail]/Drafts", name: "Drafts", unreadCount: 0, role: .drafts),
+            MailFolder(id: "[Gmail]/Trash", name: "Trash", unreadCount: 0, role: .trash),
         ]
     }
 
@@ -466,12 +704,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func downloadAttachment(emailId: Int64, attachment: AttachmentInfo) {
+        guard let accountManager else { return }
+        Task { @MainActor in
+            do {
+                let data = try await accountManager.fetchAttachmentData(emailId: emailId, partId: attachment.partId)
+                let panel = NSSavePanel()
+                panel.nameFieldStringValue = attachment.filename ?? "attachment"
+                panel.canCreateDirectories = true
+                if panel.runModal() == .OK, let url = panel.url {
+                    try data.write(to: url)
+                }
+            } catch {
+                showError("Failed to download attachment: \(error.localizedDescription)")
+            }
+        }
+    }
+
     private func showError(_ message: String) {
         let alert = NSAlert()
         alert.messageText = "Error"
         alert.informativeText = message
         alert.alertStyle = .warning
         alert.runModal()
+    }
+
+    private func isAuthError(_ error: Error) -> Bool {
+        guard let e = error as? IMAPProviderError else { return false }
+        switch e {
+        case .noCredentials, .authFailed: return true
+        default: return false
+        }
     }
 
     // MARK: - Demo Data
