@@ -169,6 +169,41 @@ final class MessageListView: NSObject {
         tableView.scrollRowToVisible(prev)
     }
 
+    /// Get table row indices for a set of email IDs.
+    func indicesForIds(_ ids: Set<Int64>) -> IndexSet {
+        var indexSet = IndexSet()
+        for (i, group) in threadGroups.enumerated() {
+            if ids.contains(group.primaryHeader.id) {
+                indexSet.insert(i)
+            }
+        }
+        return indexSet
+    }
+
+    /// Remove rows with animation. Updates data source first, then animates.
+    func removeRows(forIds ids: Set<Int64>) {
+        let indices = indicesForIds(ids)
+        guard !indices.isEmpty else { return }
+
+        // Update data source BEFORE animation
+        var remaining: [ThreadGroup] = []
+        for (i, group) in threadGroups.enumerated() {
+            if !indices.contains(i) {
+                remaining.append(group)
+            }
+        }
+        threadGroups = remaining
+        checkedIds.subtract(ids)
+
+        // Animate
+        tableView.beginUpdates()
+        tableView.removeRows(at: indices, withAnimation: .effectFade)
+        tableView.endUpdates()
+
+        onCheckedIdsChanged?(checkedIds)
+        updateEmptyState()
+    }
+
     /// Clear all checkbox selections.
     func clearCheckedIds() {
         checkedIds = []

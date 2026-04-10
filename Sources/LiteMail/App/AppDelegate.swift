@@ -276,6 +276,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Actions
 
+    /// Expand a list of visible-row email IDs to include all thread members.
+    /// If a row has a threadId, fetches all messages in that thread from the store.
+    /// Falls back to the original ID if no thread is found.
+    private func expandThreadIds(_ ids: [Int64]) async throws -> [Int64] {
+        guard let accountManager else { return ids }
+        var expanded = Set<Int64>()
+        let groups = windowController?.messageListView.threadGroups ?? []
+        for id in ids {
+            if let group = groups.first(where: { $0.primaryHeader.id == id }),
+               let threadId = group.threadId {
+                let threadMembers = try await accountManager.fetchThread(threadId: threadId)
+                for header in threadMembers {
+                    expanded.insert(header.id)
+                }
+            } else {
+                expanded.insert(id)
+            }
+        }
+        return Array(expanded)
+    }
+
     private func handleAction(_ action: MailAction) {
         guard let accountManager else { return }
 
@@ -319,27 +340,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 case .search(let query):
                     performSearch(query: query)
                 case .batchDelete(let ids) where !ids.isEmpty:
-                    try await accountManager.deleteBatch(emailIds: ids)
-                    windowController?.messageListView.clearCheckedIds()
-                    loadMessages()
+                    let expandedIds = try await expandThreadIds(ids)
+                    try await accountManager.deleteBatch(emailIds: expandedIds)
+                    windowController?.messageListView.removeRows(forIds: Set(ids))
+                    let deleteDesc = expandedIds.count != ids.count
+                        ? "Deleted \(ids.count) conversation\(ids.count == 1 ? "" : "s") (\(expandedIds.count) messages)"
+                        : "Deleted \(ids.count) conversation\(ids.count == 1 ? "" : "s")"
                     let deleteAction = UndoableBatchAction(
-                        description: "Deleted \(ids.count) message\(ids.count == 1 ? "" : "s")",
+                        description: deleteDesc,
                         reverseOperation: { [weak self] in
                             guard let store = self?.accountManager?.store else { return }
-                            try await store.unmarkDeletedBatch(emailIds: ids)
+                            try await store.unmarkDeletedBatch(emailIds: expandedIds)
                         },
-                        emailIds: ids
+                        emailIds: expandedIds
                     )
                     windowController?.undoToastView.onUndo = { [weak self] in self?.loadMessages() }
                     windowController?.undoToastView.show(action: deleteAction, onExpire: {})
                 case .batchArchive(let ids) where !ids.isEmpty:
+                    let expandedIds = try await expandThreadIds(ids)
                     // Capture original folders before archiving for undo
-                    let originalRecords = try await accountManager.store.fetchEmailRecords(ids: ids)
-                    try await accountManager.archiveBatch(emailIds: ids)
-                    windowController?.messageListView.clearCheckedIds()
-                    loadMessages()
+                    let originalRecords = try await accountManager.store.fetchEmailRecords(ids: expandedIds)
+                    try await accountManager.archiveBatch(emailIds: expandedIds)
+                    windowController?.messageListView.removeRows(forIds: Set(ids))
+                    let archiveDesc = expandedIds.count != ids.count
+                        ? "Archived \(ids.count) conversation\(ids.count == 1 ? "" : "s") (\(expandedIds.count) messages)"
+                        : "Archived \(ids.count) conversation\(ids.count == 1 ? "" : "s")"
                     let archiveAction = UndoableBatchAction(
-                        description: "Archived \(ids.count) message\(ids.count == 1 ? "" : "s")",
+                        description: archiveDesc,
                         reverseOperation: { [weak self] in
                             guard let store = self?.accountManager?.store else { return }
                             // Restore each email to its original folder
@@ -349,56 +376,62 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                 try await store.moveEmailBatch(emailIds: [emailId], toFolder: originalFolder)
                             }
                         },
-                        emailIds: ids
+                        emailIds: expandedIds
                     )
                     windowController?.undoToastView.onUndo = { [weak self] in self?.loadMessages() }
                     windowController?.undoToastView.show(action: archiveAction, onExpire: {})
                 case .batchMarkRead(let ids) where !ids.isEmpty:
-                    try await accountManager.markReadBatch(emailIds: ids, read: true)
+                    let expandedIds = try await expandThreadIds(ids)
+                    try await accountManager.markReadBatch(emailIds: expandedIds, read: true)
                     windowController?.messageListView.clearCheckedIds()
                     loadMessages()
                     let markReadAction = UndoableBatchAction(
-                        description: "Marked \(ids.count) message\(ids.count == 1 ? "" : "s") as read",
+                        description: "Marked \(ids.count) conversation\(ids.count == 1 ? "" : "s") as read",
                         reverseOperation: { [weak self] in
-                            try await self?.accountManager?.markReadBatch(emailIds: ids, read: false)
+                            try await self?.accountManager?.markReadBatch(emailIds: expandedIds, read: false)
                         },
-                        emailIds: ids
+                        emailIds: expandedIds
                     )
                     windowController?.undoToastView.onUndo = { [weak self] in self?.loadMessages() }
                     windowController?.undoToastView.show(action: markReadAction, onExpire: {})
                 case .batchMarkUnread(let ids) where !ids.isEmpty:
-                    try await accountManager.markReadBatch(emailIds: ids, read: false)
+                    let expandedIds = try await expandThreadIds(ids)
+                    try await accountManager.markReadBatch(emailIds: expandedIds, read: false)
                     windowController?.messageListView.clearCheckedIds()
                     loadMessages()
                     let markUnreadAction = UndoableBatchAction(
-                        description: "Marked \(ids.count) message\(ids.count == 1 ? "" : "s") as unread",
+                        description: "Marked \(ids.count) conversation\(ids.count == 1 ? "" : "s") as unread",
                         reverseOperation: { [weak self] in
-                            try await self?.accountManager?.markReadBatch(emailIds: ids, read: true)
+                            try await self?.accountManager?.markReadBatch(emailIds: expandedIds, read: true)
                         },
-                        emailIds: ids
+                        emailIds: expandedIds
                     )
                     windowController?.undoToastView.onUndo = { [weak self] in self?.loadMessages() }
                     windowController?.undoToastView.show(action: markUnreadAction, onExpire: {})
                 case .batchToggleStar(let ids) where !ids.isEmpty:
-                    try await accountManager.markStarredBatch(emailIds: ids, starred: true)
+                    let expandedIds = try await expandThreadIds(ids)
+                    try await accountManager.markStarredBatch(emailIds: expandedIds, starred: true)
                     windowController?.messageListView.clearCheckedIds()
                     loadMessages()
                     let starAction = UndoableBatchAction(
-                        description: "Starred \(ids.count) message\(ids.count == 1 ? "" : "s")",
+                        description: "Starred \(ids.count) conversation\(ids.count == 1 ? "" : "s")",
                         reverseOperation: { [weak self] in
-                            try await self?.accountManager?.markStarredBatch(emailIds: ids, starred: false)
+                            try await self?.accountManager?.markStarredBatch(emailIds: expandedIds, starred: false)
                         },
-                        emailIds: ids
+                        emailIds: expandedIds
                     )
                     windowController?.undoToastView.onUndo = { [weak self] in self?.loadMessages() }
                     windowController?.undoToastView.show(action: starAction, onExpire: {})
                 case .batchMove(let ids, let folder) where !ids.isEmpty && !folder.isEmpty:
-                    let preRecords = try await accountManager.store.fetchEmailRecords(ids: ids)
-                    try await accountManager.moveBatch(emailIds: ids, toFolder: folder)
-                    windowController?.messageListView.clearCheckedIds()
-                    loadMessages()
+                    let expandedIds = try await expandThreadIds(ids)
+                    let preRecords = try await accountManager.store.fetchEmailRecords(ids: expandedIds)
+                    try await accountManager.moveBatch(emailIds: expandedIds, toFolder: folder)
+                    windowController?.messageListView.removeRows(forIds: Set(ids))
+                    let moveDesc = expandedIds.count != ids.count
+                        ? "Moved \(ids.count) conversation\(ids.count == 1 ? "" : "s") (\(expandedIds.count) messages)"
+                        : "Moved \(ids.count) conversation\(ids.count == 1 ? "" : "s")"
                     let moveAction = UndoableBatchAction(
-                        description: "Moved \(ids.count) message\(ids.count == 1 ? "" : "s")",
+                        description: moveDesc,
                         reverseOperation: { [weak self] in
                             guard let store = self?.accountManager?.store else { return }
                             for record in preRecords {
@@ -406,7 +439,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                 try await store.moveEmailBatch(emailIds: [emailId], toFolder: record.folder)
                             }
                         },
-                        emailIds: ids
+                        emailIds: expandedIds
                     )
                     windowController?.undoToastView.onUndo = { [weak self] in self?.loadMessages() }
                     windowController?.undoToastView.show(action: moveAction, onExpire: {})
