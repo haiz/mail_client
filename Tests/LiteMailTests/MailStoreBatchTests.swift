@@ -52,4 +52,93 @@ final class MailStoreBatchTests: XCTestCase {
         XCTAssertEqual(afterDelete.count, 2)
         XCTAssertFalse(afterDelete.contains(where: { $0.id == all[0].id }))
     }
+
+    // MARK: - Helpers
+
+    private func insertTestEmails(count: Int, folder: String = "INBOX") async throws -> [Int64] {
+        var ids: [Int64] = []
+        for i in 1...count {
+            let record = EmailRecord(
+                messageId: "batch-\(UUID().uuidString)@test.com",
+                folder: folder,
+                senderEmail: "sender\(i)@test.com",
+                date: 1000 + i,
+                isRead: false,
+                isStarred: false,
+                isDeleted: false,
+                hasAttachments: false,
+                accountId: testAccountId
+            )
+            let id = try await store.insertEmail(record)
+            ids.append(id)
+        }
+        return ids
+    }
+
+    // MARK: - Batch Operations
+
+    func testMarkReadBatch() async throws {
+        let ids = try await insertTestEmails(count: 5)
+        try await store.markReadBatch(emailIds: ids, read: true)
+        for id in ids {
+            let record = try await store.fetchEmailRecord(id: id)
+            XCTAssertTrue(record!.isRead)
+        }
+    }
+
+    func testMarkReadBatchEmptyArray() async throws {
+        try await store.markReadBatch(emailIds: [], read: true)
+    }
+
+    func testMarkStarredBatch() async throws {
+        let ids = try await insertTestEmails(count: 3)
+        try await store.markStarredBatch(emailIds: ids, starred: true)
+        for id in ids {
+            let record = try await store.fetchEmailRecord(id: id)
+            XCTAssertTrue(record!.isStarred)
+        }
+    }
+
+    func testMarkDeletedBatch() async throws {
+        let ids = try await insertTestEmails(count: 4)
+        try await store.markDeletedBatch(emailIds: ids)
+        for id in ids {
+            let record = try await store.fetchEmailRecord(id: id)
+            XCTAssertTrue(record!.isDeleted)
+        }
+    }
+
+    func testUnmarkDeletedBatch() async throws {
+        let ids = try await insertTestEmails(count: 3)
+        try await store.markDeletedBatch(emailIds: ids)
+        try await store.unmarkDeletedBatch(emailIds: ids)
+        for id in ids {
+            let record = try await store.fetchEmailRecord(id: id)
+            XCTAssertFalse(record!.isDeleted)
+        }
+    }
+
+    func testMoveEmailBatch() async throws {
+        let ids = try await insertTestEmails(count: 3, folder: "INBOX")
+        try await store.moveEmailBatch(emailIds: ids, toFolder: "Archive")
+        for id in ids {
+            let record = try await store.fetchEmailRecord(id: id)
+            XCTAssertEqual(record!.folder, "Archive")
+        }
+    }
+
+    func testFetchEmailRecords() async throws {
+        let ids = try await insertTestEmails(count: 3)
+        let records = try await store.fetchEmailRecords(ids: ids)
+        XCTAssertEqual(records.count, 3)
+    }
+
+    func testBatchWithNonexistentIds() async throws {
+        let ids = try await insertTestEmails(count: 2)
+        try await store.markReadBatch(emailIds: ids + [99999], read: true)
+        for id in ids {
+            let record = try await store.fetchEmailRecord(id: id)
+            XCTAssertTrue(record!.isRead)
+        }
+    }
 }

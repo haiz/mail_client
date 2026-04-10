@@ -447,6 +447,84 @@ actor MailStore {
         }
     }
 
+    // MARK: - Batch Actions
+
+    func markReadBatch(emailIds: [Int64], read: Bool) throws {
+        guard !emailIds.isEmpty else { return }
+        let placeholders = emailIds.map { _ in "?" }.joined(separator: ",")
+        var args: [DatabaseValueConvertible] = [read ? 1 : 0]
+        args += emailIds.map { $0 as DatabaseValueConvertible }
+        try dbPool.write { db in
+            try db.execute(
+                sql: "UPDATE emails SET is_read = ? WHERE id IN (\(placeholders))",
+                arguments: StatementArguments(args)
+            )
+        }
+    }
+
+    func markStarredBatch(emailIds: [Int64], starred: Bool) throws {
+        guard !emailIds.isEmpty else { return }
+        let placeholders = emailIds.map { _ in "?" }.joined(separator: ",")
+        var args: [DatabaseValueConvertible] = [starred ? 1 : 0]
+        args += emailIds.map { $0 as DatabaseValueConvertible }
+        try dbPool.write { db in
+            try db.execute(
+                sql: "UPDATE emails SET is_starred = ? WHERE id IN (\(placeholders))",
+                arguments: StatementArguments(args)
+            )
+        }
+    }
+
+    func markDeletedBatch(emailIds: [Int64]) throws {
+        guard !emailIds.isEmpty else { return }
+        let placeholders = emailIds.map { _ in "?" }.joined(separator: ",")
+        let args = emailIds.map { $0 as DatabaseValueConvertible }
+        try dbPool.write { db in
+            try db.execute(
+                sql: "UPDATE emails SET is_deleted = 1 WHERE id IN (\(placeholders))",
+                arguments: StatementArguments(args)
+            )
+        }
+    }
+
+    func unmarkDeletedBatch(emailIds: [Int64]) throws {
+        guard !emailIds.isEmpty else { return }
+        let placeholders = emailIds.map { _ in "?" }.joined(separator: ",")
+        let args = emailIds.map { $0 as DatabaseValueConvertible }
+        try dbPool.write { db in
+            try db.execute(
+                sql: "UPDATE emails SET is_deleted = 0 WHERE id IN (\(placeholders))",
+                arguments: StatementArguments(args)
+            )
+        }
+    }
+
+    func moveEmailBatch(emailIds: [Int64], toFolder: String) throws {
+        guard !emailIds.isEmpty else { return }
+        let placeholders = emailIds.map { _ in "?" }.joined(separator: ",")
+        var args: [DatabaseValueConvertible] = [toFolder]
+        args += emailIds.map { $0 as DatabaseValueConvertible }
+        try dbPool.write { db in
+            try db.execute(
+                sql: "UPDATE emails SET folder = ? WHERE id IN (\(placeholders))",
+                arguments: StatementArguments(args)
+            )
+        }
+    }
+
+    func fetchEmailRecords(ids: [Int64]) throws -> [EmailRecord] {
+        guard !ids.isEmpty else { return [] }
+        let placeholders = ids.map { _ in "?" }.joined(separator: ",")
+        let args = ids.map { $0 as DatabaseValueConvertible }
+        return try dbPool.read { db in
+            try EmailRecord.fetchAll(
+                db,
+                sql: "SELECT * FROM emails WHERE id IN (\(placeholders))",
+                arguments: StatementArguments(args)
+            )
+        }
+    }
+
     // MARK: - Attachments
 
     func insertAttachments(_ attachments: [AttachmentRecord]) throws {
