@@ -56,8 +56,8 @@ final class MainWindowController: NSObject {
         bulkActionBar.translatesAutoresizingMaskIntoConstraints = false
         messageListView.view.translatesAutoresizingMaskIntoConstraints = false
         undoToastView.translatesAutoresizingMaskIntoConstraints = false
-        messageColumn.addSubview(bulkActionBar)
         messageColumn.addSubview(messageListView.view)
+        messageColumn.addSubview(bulkActionBar)
         messageColumn.addSubview(undoToastView)
 
         NSLayoutConstraint.activate([
