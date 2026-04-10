@@ -46,6 +46,7 @@ protocol MailProvider: Actor {
 
     // MARK: - Folders
 
+    func createFolder(name: String) async throws
     func listFolders() async throws -> [ProviderFolder]
 
     // MARK: - Messages (cursor-based pagination)
@@ -60,6 +61,13 @@ protocol MailProvider: Actor {
     func moveMessage(messageRef: String, toFolderId: String) async throws
     /// IMAP: flag + expunge. JMAP: move to Trash.
     func deleteMessage(messageRef: String) async throws
+
+    // MARK: - Batch Actions
+
+    func markReadBatch(messageRefs: [String], read: Bool) async throws
+    func markStarredBatch(messageRefs: [String], starred: Bool) async throws
+    func moveMessageBatch(messageRefs: [String], toFolderId: String) async throws
+    func deleteMessageBatch(messageRefs: [String]) async throws
 
     // MARK: - Attachments
 
@@ -83,6 +91,7 @@ struct ProviderFolder: Sendable {
 
 enum FolderRole: String, Sendable {
     case inbox, sent, drafts, trash, starred, archive, spam, all
+    case category  // Gmail Categories (Promotions, Social, Updates, Forums, Purchases)
 }
 
 /// Message header as reported by the provider.

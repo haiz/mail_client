@@ -130,6 +130,27 @@ actor JMAPProvider: MailProvider {
 
     // MARK: - Folders
 
+    func createFolder(name: String) async throws {
+        let jmap = try await getClient()
+        guard let jmapAccountId = jmap.currentAccountId else {
+            throw JMAPProviderError.notAuthenticated
+        }
+        let request = JMAPRequest(
+            using: ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+            methodCalls: [
+                JMAPMethodCall(
+                    method: "Mailbox/set",
+                    arguments: [
+                        "accountId": jmapAccountId,
+                        "create": ["newFolder": ["name": name]]
+                    ],
+                    clientId: "createFolder"
+                )
+            ]
+        )
+        _ = try await jmap.makeRequest(request)
+    }
+
     func listFolders() async throws -> [ProviderFolder] {
         let jmap = try await getClient()
         let mailboxes = try await jmap.getMailboxes()
@@ -157,36 +178,175 @@ actor JMAPProvider: MailProvider {
     }
 
     func fetchMessageBody(messageRef: String) async throws -> ProviderMessageBody {
-        // The body is already fetched with the email in JMAP (bodyValues)
-        // For now, return what we have in the store
+        // Try local cache first
         if let emailId = try await store.findEmailId(byMessageId: messageRef, accountId: accountId),
            let body = try await store.fetchBody(emailId: emailId) {
             return ProviderMessageBody(ref: messageRef, textBody: body.text, htmlBody: body.html)
         }
+
+        // Fetch from JMAP using Email/get with bodyValues
+        let jmap = try await getClient()
+        guard let jmapAccountId = jmap.currentAccountId else {
+            throw JMAPProviderError.notAuthenticated
+        }
+        let request = JMAPRequest(
+            using: ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+            methodCalls: [
+                JMAPMethodCall(
+                    method: "Email/get",
+                    arguments: [
+                        "accountId": jmapAccountId,
+                        "ids": [messageRef],
+                        "properties": ["bodyValues", "textBody", "htmlBody"],
+                        "fetchTextBodyValues": true,
+                        "fetchHTMLBodyValues": true
+                    ],
+                    clientId: "fetchBody"
+                )
+            ]
+        )
+        let response = try await jmap.makeRequest(request)
+
+        // Parse the response to get body values
+        if let firstResponse = response.methodResponses.first,
+           let list = firstResponse.response["list"] as? [[String: Any]],
+           let email = list.first {
+            let textBody = Self.extractBodyValue(from: email, bodyKey: "textBody")
+            let htmlBody = Self.extractBodyValue(from: email, bodyKey: "htmlBody")
+            return ProviderMessageBody(ref: messageRef, textBody: textBody, htmlBody: htmlBody)
+        }
+
         return ProviderMessageBody(ref: messageRef, textBody: nil, htmlBody: nil)
+    }
+
+    /// Extract body text from JMAP Email/get response bodyValues.
+    private static func extractBodyValue(from email: [String: Any], bodyKey: String) -> String? {
+        guard let parts = email[bodyKey] as? [[String: Any]],
+              let partId = parts.first?["partId"] as? String,
+              let bodyValues = email["bodyValues"] as? [String: [String: Any]],
+              let value = bodyValues[partId]?["value"] as? String else {
+            return nil
+        }
+        return value
     }
 
     // MARK: - Actions
 
     func markRead(messageRef: String, read: Bool) async throws {
-        // Store-level for now. JMAP flag sync: set $seen keyword.
+        try await emailSet(messageRef: messageRef, update: [
+            "keywords/$seen": read
+        ])
     }
 
     func markStarred(messageRef: String, starred: Bool) async throws {
-        // Store-level. JMAP: set $flagged keyword.
+        try await emailSet(messageRef: messageRef, update: [
+            "keywords/$flagged": starred
+        ])
     }
 
     func moveMessage(messageRef: String, toFolderId: String) async throws {
-        // Store-level. JMAP: update mailboxIds.
+        try await emailSet(messageRef: messageRef, update: [
+            "mailboxIds": [toFolderId: true]
+        ])
     }
 
     func deleteMessage(messageRef: String) async throws {
-        // Store-level. JMAP: move to Trash mailbox.
+        let jmap = try await getClient()
+        guard let trashMailbox = try await jmap.getMailbox(byRole: .trash) else {
+            throw JMAPProviderError.notImplemented
+        }
+        try await emailSet(messageRef: messageRef, update: [
+            "mailboxIds": [trashMailbox.id: true]
+        ])
+    }
+
+    // MARK: - Batch Actions
+
+    func markReadBatch(messageRefs: [String], read: Bool) async throws {
+        try await emailSetBatch(messageRefs: messageRefs, update: ["keywords/$seen": read])
+    }
+
+    func markStarredBatch(messageRefs: [String], starred: Bool) async throws {
+        try await emailSetBatch(messageRefs: messageRefs, update: ["keywords/$flagged": starred])
+    }
+
+    func moveMessageBatch(messageRefs: [String], toFolderId: String) async throws {
+        try await emailSetBatch(messageRefs: messageRefs, update: ["mailboxIds": [toFolderId: true]])
+    }
+
+    func deleteMessageBatch(messageRefs: [String]) async throws {
+        let jmap = try await getClient()
+        guard let trashMailbox = try await jmap.getMailbox(byRole: .trash) else {
+            throw JMAPProviderError.notImplemented
+        }
+        try await emailSetBatch(messageRefs: messageRefs, update: ["mailboxIds": [trashMailbox.id: true]])
+    }
+
+    private func emailSetBatch(messageRefs: [String], update: [String: Any]) async throws {
+        guard !messageRefs.isEmpty else { return }
+        let jmap = try await getClient()
+        guard let jmapAccountId = jmap.currentAccountId else {
+            throw JMAPProviderError.notAuthenticated
+        }
+        var updateDict: [String: Any] = [:]
+        for ref in messageRefs {
+            updateDict[ref] = update
+        }
+        let request = JMAPRequest(
+            using: ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+            methodCalls: [
+                JMAPMethodCall(method: "Email/set", arguments: [
+                    "accountId": jmapAccountId,
+                    "update": updateDict
+                ], clientId: "batchSync")
+            ]
+        )
+        _ = try await jmap.makeRequest(request)
+    }
+
+    /// Helper: call Email/set with an update patch for a single email.
+    private func emailSet(messageRef: String, update: [String: Any]) async throws {
+        let jmap = try await getClient()
+        guard let jmapAccountId = jmap.currentAccountId else {
+            throw JMAPProviderError.notAuthenticated
+        }
+        let request = JMAPRequest(
+            using: ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+            methodCalls: [
+                JMAPMethodCall(
+                    method: "Email/set",
+                    arguments: [
+                        "accountId": jmapAccountId,
+                        "update": [messageRef: update]
+                    ],
+                    clientId: "flagSync"
+                )
+            ]
+        )
+        _ = try await jmap.makeRequest(request)
     }
 
     func fetchAttachment(messageRef: String, partId: String) async throws -> Data {
-        // JMAP: download blob via blobId
-        throw JMAPProviderError.notImplemented
+        // JMAP: partId here is actually the blobId
+        let jmap = try await getClient()
+        guard let session = jmap.currentSession,
+              let jmapAccountId = jmap.currentAccountId else {
+            throw JMAPProviderError.notAuthenticated
+        }
+        // Build download URL from template: {downloadUrl}/{accountId}/{blobId}/{name}
+        var urlStr = session.downloadUrl
+            .replacingOccurrences(of: "{accountId}", with: jmapAccountId)
+            .replacingOccurrences(of: "{blobId}", with: partId)
+            .replacingOccurrences(of: "{name}", with: "attachment")
+        // Some templates use query params instead
+        if urlStr.contains("{type}") {
+            urlStr = urlStr.replacingOccurrences(of: "{type}", with: "application/octet-stream")
+        }
+        guard let url = URL(string: urlStr) else {
+            throw JMAPProviderError.notImplemented
+        }
+        let (data, _) = try await URLSession.shared.data(from: url)
+        return data
     }
 
     // MARK: - Send
@@ -266,6 +426,7 @@ enum JMAPProviderError: Error, LocalizedError {
     case missingJMAPUrl
     case missingToken
     case notConnected
+    case notAuthenticated
     case notImplemented
 
     var errorDescription: String? {
@@ -273,6 +434,7 @@ enum JMAPProviderError: Error, LocalizedError {
         case .missingJMAPUrl: "JMAP server URL not configured."
         case .missingToken: "Authentication token not found."
         case .notConnected: "Not connected to JMAP server."
+        case .notAuthenticated: "Not authenticated with JMAP server."
         case .notImplemented: "Feature not yet implemented for JMAP."
         }
     }

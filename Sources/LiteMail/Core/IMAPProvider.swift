@@ -330,6 +330,69 @@ actor IMAPProvider: MailProvider {
         try await imap.expunge()
     }
 
+    // MARK: - Batch Actions
+
+    func markReadBatch(messageRefs: [String], read: Bool) async throws {
+        guard !messageRefs.isEmpty else { return }
+        let imap = try await getIMAP()
+        for (folder, uids) in Self.groupRefsByFolder(messageRefs) {
+            if let folder { _ = try await imap.selectMailbox(folder) }
+            let uidSet = MessageIdentifierSet<UID>(uids)
+            try await imap.store(flags: [.seen], on: uidSet, operation: read ? .add : .remove)
+        }
+    }
+
+    func markStarredBatch(messageRefs: [String], starred: Bool) async throws {
+        guard !messageRefs.isEmpty else { return }
+        let imap = try await getIMAP()
+        for (folder, uids) in Self.groupRefsByFolder(messageRefs) {
+            if let folder { _ = try await imap.selectMailbox(folder) }
+            let uidSet = MessageIdentifierSet<UID>(uids)
+            try await imap.store(flags: [.flagged], on: uidSet, operation: starred ? .add : .remove)
+        }
+    }
+
+    func moveMessageBatch(messageRefs: [String], toFolderId: String) async throws {
+        guard !messageRefs.isEmpty else { return }
+        let imap = try await getIMAP()
+        for (folder, uids) in Self.groupRefsByFolder(messageRefs) {
+            if let folder { _ = try await imap.selectMailbox(folder) }
+            for uid in uids {
+                try await imap.move(message: uid, to: toFolderId)
+            }
+        }
+    }
+
+    func deleteMessageBatch(messageRefs: [String]) async throws {
+        guard !messageRefs.isEmpty else { return }
+        let imap = try await getIMAP()
+        for (folder, uids) in Self.groupRefsByFolder(messageRefs) {
+            if let folder { _ = try await imap.selectMailbox(folder) }
+            let uidSet = MessageIdentifierSet<UID>(uids)
+            try await imap.store(flags: [.deleted], on: uidSet, operation: .add)
+            try await imap.expunge()
+        }
+    }
+
+    /// Group messageRefs by folder for batch IMAP operations.
+    private static func groupRefsByFolder(_ refs: [String]) -> [(folder: String?, uids: [UID])] {
+        var groups: [String: [UID]] = [:]
+        var noFolder: [UID] = []
+        for ref in refs {
+            let (folder, uid) = parseFolderAndUidRef(ref)
+            if let folder {
+                groups[folder, default: []].append(uid)
+            } else {
+                noFolder.append(uid)
+            }
+        }
+        var result: [(folder: String?, uids: [UID])] = groups.map { (folder: $0.key, uids: $0.value) }
+        if !noFolder.isEmpty {
+            result.append((folder: nil, uids: noFolder))
+        }
+        return result
+    }
+
     func fetchAttachment(messageRef: String, partId: String) async throws -> Data {
         let imap = try await getIMAP()
         let uid = Self.parseUidRef(messageRef)

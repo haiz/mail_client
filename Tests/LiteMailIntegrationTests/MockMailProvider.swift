@@ -130,6 +130,30 @@ actor MockMailProvider: MailProvider {
         if let error = stubbedError { throw error }
     }
 
+    func markReadBatch(messageRefs: [String], read: Bool) async throws {
+        calls.append("markReadBatch:\(messageRefs.joined(separator: ",")):\(read)")
+        for ref in messageRefs { markReadCalls.append((ref: ref, read: read)) }
+        if let error = stubbedError { throw error }
+    }
+
+    func markStarredBatch(messageRefs: [String], starred: Bool) async throws {
+        calls.append("markStarredBatch:\(messageRefs.joined(separator: ",")):\(starred)")
+        for ref in messageRefs { markStarredCalls.append((ref: ref, starred: starred)) }
+        if let error = stubbedError { throw error }
+    }
+
+    func moveMessageBatch(messageRefs: [String], toFolderId: String) async throws {
+        calls.append("moveMessageBatch:\(messageRefs.joined(separator: ",")):\(toFolderId)")
+        for ref in messageRefs { moveCalls.append((ref: ref, toFolderId: toFolderId)) }
+        if let error = stubbedError { throw error }
+    }
+
+    func deleteMessageBatch(messageRefs: [String]) async throws {
+        calls.append("deleteMessageBatch:\(messageRefs.joined(separator: ","))")
+        deleteCalls.append(contentsOf: messageRefs)
+        if let error = stubbedError { throw error }
+    }
+
     func fetchAttachment(messageRef: String, partId: String) async throws -> Data {
         calls.append("fetchAttachment:\(messageRef):\(partId)")
         fetchAttachmentCalls.append((ref: messageRef, partId: partId))
