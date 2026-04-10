@@ -36,6 +36,30 @@ protocol MailEngineProtocol: Sendable {
     func delete(emailId: Int64) async throws
     func move(emailId: Int64, toFolder: String) async throws
 
+    // MARK: - Batch Actions
+
+    func deleteBatch(emailIds: [Int64]) async throws
+    func archiveBatch(emailIds: [Int64]) async throws
+    func markReadBatch(emailIds: [Int64], read: Bool) async throws
+    func markStarredBatch(emailIds: [Int64], starred: Bool) async throws
+    func moveBatch(emailIds: [Int64], toFolder: String) async throws
+
+    // MARK: - Folders
+
+    func createFolder(name: String, accountId: String) async throws
+
+    // MARK: - Labels
+
+    func addLabel(emailId: Int64, label: String) async throws
+    func removeLabel(emailId: Int64, label: String) async throws
+    func fetchLabels(emailId: Int64) async throws -> [String]
+    func allLabels(accountId: String) async throws -> [String]
+
+    // MARK: - Attachments
+
+    func listAttachments(emailId: Int64) async throws -> [AttachmentInfo]
+    func fetchAttachmentData(emailId: Int64, partId: String) async throws -> Data
+
     // MARK: - Compose
 
     func send(message: OutgoingMessage, fromAccountId: String) async throws
@@ -43,6 +67,14 @@ protocol MailEngineProtocol: Sendable {
 }
 
 // MARK: - Data Types (used by GUI)
+
+struct AttachmentInfo: Sendable, Identifiable {
+    let id: String  // partId or DB id
+    let partId: String
+    let filename: String?
+    let mimeType: String?
+    let sizeBytes: Int?
+}
 
 struct EmailHeader: Sendable, Identifiable {
     let id: Int64
@@ -70,6 +102,13 @@ struct MailFolder: Sendable, Identifiable {
     let id: String
     let name: String
     let unreadCount: Int
+    let role: FolderRole?
+}
+
+struct OutgoingAttachment: Sendable {
+    let filename: String
+    let mimeType: String
+    let data: Data
 }
 
 struct OutgoingMessage: Sendable {
@@ -80,4 +119,13 @@ struct OutgoingMessage: Sendable {
     let bodyText: String
     let bodyHtml: String?
     let inReplyTo: String?
+    let attachments: [OutgoingAttachment]
+
+    init(to: [String], cc: [String], bcc: [String], subject: String,
+         bodyText: String, bodyHtml: String? = nil, inReplyTo: String? = nil,
+         attachments: [OutgoingAttachment] = []) {
+        self.to = to; self.cc = cc; self.bcc = bcc; self.subject = subject
+        self.bodyText = bodyText; self.bodyHtml = bodyHtml; self.inReplyTo = inReplyTo
+        self.attachments = attachments
+    }
 }

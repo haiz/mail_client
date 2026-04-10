@@ -27,6 +27,13 @@ final class MockMailEngine: MailEngineProtocol, @unchecked Sendable {
     private(set) var draftCalls: [(OutgoingMessage, String)] = []
     private(set) var syncCalls: [String] = []
 
+    // Batch call recording
+    private(set) var deleteBatchCalls: [[Int64]] = []
+    private(set) var archiveBatchCalls: [[Int64]] = []
+    private(set) var markReadBatchCalls: [([Int64], Bool)] = []
+    private(set) var markStarredBatchCalls: [([Int64], Bool)] = []
+    private(set) var moveBatchCalls: [([Int64], String)] = []
+
     func listAccounts() async throws -> [AccountConfig] { calls.append("listAccounts"); return accounts }
     func addAccount(_ config: AccountConfig) async throws { calls.append("addAccount"); accounts.append(config) }
     func removeAccount(id: String) async throws { calls.append("removeAccount"); accounts.removeAll { $0.id == id } }
@@ -60,4 +67,11 @@ final class MockMailEngine: MailEngineProtocol, @unchecked Sendable {
     func fetchAttachmentData(emailId: Int64, partId: String) async throws -> Data { calls.append("fetchAttachmentData"); return attachmentData["\(emailId):\(partId)"] ?? Data() }
     func send(message: OutgoingMessage, fromAccountId: String) async throws { calls.append("send"); sendCalls.append((message, fromAccountId)) }
     func saveDraft(_ draft: OutgoingMessage, accountId: String) async throws { calls.append("saveDraft"); draftCalls.append((draft, accountId)) }
+
+    // MARK: - Batch Actions
+    func deleteBatch(emailIds: [Int64]) async throws { calls.append("deleteBatch"); deleteBatchCalls.append(emailIds) }
+    func archiveBatch(emailIds: [Int64]) async throws { calls.append("archiveBatch"); archiveBatchCalls.append(emailIds) }
+    func markReadBatch(emailIds: [Int64], read: Bool) async throws { calls.append("markReadBatch"); markReadBatchCalls.append((emailIds, read)) }
+    func markStarredBatch(emailIds: [Int64], starred: Bool) async throws { calls.append("markStarredBatch"); markStarredBatchCalls.append((emailIds, starred)) }
+    func moveBatch(emailIds: [Int64], toFolder: String) async throws { calls.append("moveBatch"); moveBatchCalls.append((emailIds, toFolder)) }
 }

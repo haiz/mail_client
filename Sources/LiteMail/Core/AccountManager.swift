@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 
 /// Owns all accounts and their mail providers.
 /// Routes operations to the correct account's provider.
@@ -150,25 +151,41 @@ actor AccountManager: MailEngineProtocol {
     // MARK: - Read
 
     func fetchHeaders(accountId: String, folder: String, offset: Int, limit: Int) async throws -> [EmailHeader] {
-        let records = try await store.fetchHeaders(accountId: accountId, folder: folder, offset: offset, limit: limit)
+        // Use concurrent reader to avoid blocking behind sync writes on the actor.
+        let records = try store.concurrentReader.read { db in
+            try EmailRecord
+                .filter(Column("account_id") == accountId && Column("folder") == folder && Column("is_deleted") == false)
+                .order(Column("date").desc)
+                .limit(limit, offset: offset)
+                .fetchAll(db)
+        }
         return records.map(Self.recordToHeader)
     }
 
     func fetchBody(emailId: Int64) async throws -> EmailBody? {
-        // Try local cache first (covers INBOX messages and any previously loaded body).
-        if let body = try await store.fetchBody(emailId: emailId) {
+        // Use concurrent reader so we don't block behind sync writes on the actor.
+        let cached = try store.concurrentReader.read { db -> (text: String?, html: String?)? in
+            let row = try Row.fetchOne(db, sql: "SELECT body_text, body_html FROM email_bodies WHERE email_id = ?", arguments: [emailId])
+            guard let row else { return nil }
+            return (text: row["body_text"], html: row["body_html"])
+        }
+        if let body = cached {
             return EmailBody(emailId: emailId, textBody: body.text, htmlBody: body.html)
         }
 
         // Body not cached — fetch from the provider using the email's folder + UID (IMAP)
         // or the JMAP email ID.
-        guard let record = try await store.fetchEmailRecord(id: emailId),
-              let accountId = record.accountId,
+        let record = try store.concurrentReader.read { db in
+            try EmailRecord.fetchOne(db, key: emailId)
+        }
+        guard let record, let accountId = record.accountId,
               let provider = providers[accountId] else {
             return nil
         }
 
-        let config = try await store.getAccount(id: accountId)
+        let config = try store.concurrentReader.read { db in
+            try AccountRecord.fetchOne(db, key: accountId)
+        }
         let messageRef: String
         if config?.protocolType == "jmap" {
             messageRef = record.messageId
@@ -233,6 +250,99 @@ actor AccountManager: MailEngineProtocol {
         if let (provider, ref) = try await providerAndRef(for: emailId, folderOverride: originalFolder) {
             Task { try? await provider.moveMessage(messageRef: ref, toFolderId: toFolder) }
         }
+    }
+
+    // MARK: - Batch Actions
+
+    func deleteBatch(emailIds: [Int64]) async throws {
+        guard !emailIds.isEmpty else { return }
+        try await store.markDeletedBatch(emailIds: emailIds)
+        let groups = try await groupByAccount(emailIds: emailIds)
+        for (provider, refs) in groups {
+            Task { try? await provider.deleteMessageBatch(messageRefs: refs) }
+        }
+    }
+
+    func archiveBatch(emailIds: [Int64]) async throws {
+        guard !emailIds.isEmpty else { return }
+        let archiveFolder = "[Gmail]/All Mail"
+        // Capture original folders before moving (needed for IMAP ref building)
+        let records = try await store.fetchEmailRecords(ids: emailIds)
+        try await store.moveEmailBatch(emailIds: emailIds, toFolder: archiveFolder)
+        let groups = try await buildAccountGroups(records: records)
+        for (provider, refs) in groups {
+            Task { try? await provider.moveMessageBatch(messageRefs: refs, toFolderId: archiveFolder) }
+        }
+    }
+
+    func markReadBatch(emailIds: [Int64], read: Bool) async throws {
+        guard !emailIds.isEmpty else { return }
+        try await store.markReadBatch(emailIds: emailIds, read: read)
+        let groups = try await groupByAccount(emailIds: emailIds)
+        for (provider, refs) in groups {
+            Task { try? await provider.markReadBatch(messageRefs: refs, read: read) }
+        }
+    }
+
+    func markStarredBatch(emailIds: [Int64], starred: Bool) async throws {
+        guard !emailIds.isEmpty else { return }
+        try await store.markStarredBatch(emailIds: emailIds, starred: starred)
+        let groups = try await groupByAccount(emailIds: emailIds)
+        for (provider, refs) in groups {
+            Task { try? await provider.markStarredBatch(messageRefs: refs, starred: starred) }
+        }
+    }
+
+    func moveBatch(emailIds: [Int64], toFolder: String) async throws {
+        guard !emailIds.isEmpty else { return }
+        // Capture records before the move so we have the original folder for IMAP refs
+        let records = try await store.fetchEmailRecords(ids: emailIds)
+        try await store.moveEmailBatch(emailIds: emailIds, toFolder: toFolder)
+        let groups = try await buildAccountGroups(records: records)
+        for (provider, refs) in groups {
+            Task { try? await provider.moveMessageBatch(messageRefs: refs, toFolderId: toFolder) }
+        }
+    }
+
+    // MARK: - Batch Helpers
+
+    /// Fetch email records for the given IDs, group by account, and return (provider, [messageRef]) pairs.
+    /// Uses the *current* folder stored in the DB to build IMAP refs.
+    private func groupByAccount(emailIds: [Int64]) async throws -> [(any MailProvider, [String])] {
+        let records = try await store.fetchEmailRecords(ids: emailIds)
+        return try await buildAccountGroups(records: records)
+    }
+
+    /// Build (provider, [messageRef]) pairs from a set of already-fetched EmailRecords.
+    /// Groups by accountId; skips records missing accountId, uid (for IMAP), or provider.
+    private func buildAccountGroups(records: [EmailRecord]) async throws -> [(any MailProvider, [String])] {
+        // Group records by accountId
+        var byAccount: [String: [EmailRecord]] = [:]
+        for record in records {
+            guard let accountId = record.accountId else { continue }
+            byAccount[accountId, default: []].append(record)
+        }
+
+        var result: [(any MailProvider, [String])] = []
+        for (accountId, accountRecords) in byAccount {
+            guard let provider = providers[accountId] else { continue }
+            let accountConfig = try await store.getAccount(id: accountId)
+            let isJMAP = accountConfig?.protocolType == "jmap"
+
+            var refs: [String] = []
+            for record in accountRecords {
+                if isJMAP {
+                    refs.append(record.messageId)
+                } else {
+                    guard let uid = record.uid else { continue }
+                    refs.append("folder:\(record.folder):uid:\(uid)")
+                }
+            }
+            if !refs.isEmpty {
+                result.append((provider, refs))
+            }
+        }
+        return result
     }
 
     /// Look up the provider and build a messageRef for server-side sync.
