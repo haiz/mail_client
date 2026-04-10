@@ -152,6 +152,9 @@ final class MainWindowController: NSObject {
             guard !ids.isEmpty else { return }
             onAction?(.batchMove(ids, ""))
         }
+        bulkActionBar.onSelectAll = { [weak self] in
+            self?.messageListView.selectAllChecked()
+        }
         bulkActionBar.onDeselectAll = { [weak self] in
             self?.messageListView.clearCheckedIds()
         }

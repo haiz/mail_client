@@ -7,6 +7,7 @@ final class BulkActionBar: NSView {
     // MARK: - Subviews
 
     private let countLabel = NSTextField(labelWithString: "")
+    private let selectAllButton: NSButton
     private let deselectButton: NSButton
     private let stackView: NSStackView
     private let topBorder = NSBox()
@@ -26,6 +27,7 @@ final class BulkActionBar: NSView {
     var onStar: (() -> Void)?
     var onMove: (() -> Void)?
     var onDeselectAll: (() -> Void)?
+    var onSelectAll: (() -> Void)?
 
     // MARK: - Init
 
@@ -36,7 +38,14 @@ final class BulkActionBar: NSView {
         countLabel.setContentHuggingPriority(.required, for: .horizontal)
         countLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
 
-        // "Deselect All" link button
+        // "Select All" / "Deselect All" link buttons
+        selectAllButton = NSButton(title: "Select All", target: nil, action: nil)
+        selectAllButton.bezelStyle = .inline
+        selectAllButton.isBordered = false
+        selectAllButton.font = .systemFont(ofSize: 11)
+        selectAllButton.contentTintColor = .linkColor
+        selectAllButton.setContentHuggingPriority(.required, for: .horizontal)
+
         deselectButton = NSButton(title: "Deselect All", target: nil, action: nil)
         deselectButton.bezelStyle = .inline
         deselectButton.isBordered = false
@@ -69,9 +78,10 @@ final class BulkActionBar: NSView {
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
-        // Horizontal stack: [countLabel] [deselectButton] [spacer] [archive] [delete] [read] [star] [move]
+        // Horizontal stack: [countLabel] [selectAll] [deselectAll] [spacer] [archive] [delete] [read] [star] [move]
         stackView = NSStackView(views: [
             countLabel,
+            selectAllButton,
             deselectButton,
             spacer,
             archiveButton,
@@ -114,6 +124,7 @@ final class BulkActionBar: NSView {
         markReadButton.target = self;  markReadButton.action = #selector(markReadTapped)
         starButton.target     = self;  starButton.action     = #selector(starTapped)
         moveButton.target     = self;  moveButton.action     = #selector(moveTapped)
+        selectAllButton.target = self;  selectAllButton.action = #selector(selectAllTapped)
         deselectButton.target = self;  deselectButton.action = #selector(deselectAllTapped)
 
         // Initially hidden
@@ -156,5 +167,6 @@ final class BulkActionBar: NSView {
     @objc private func markReadTapped()   { onMarkRead?() }
     @objc private func starTapped()       { onStar?() }
     @objc private func moveTapped()       { onMove?() }
+    @objc private func selectAllTapped()   { onSelectAll?() }
     @objc private func deselectAllTapped(){ onDeselectAll?() }
 }

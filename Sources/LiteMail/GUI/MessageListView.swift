@@ -204,6 +204,13 @@ final class MessageListView: NSObject {
         updateEmptyState()
     }
 
+    /// Select all visible emails.
+    func selectAllChecked() {
+        checkedIds = Set(threadGroups.map { $0.primaryHeader.id })
+        tableView.reloadData()
+        onCheckedIdsChanged?(checkedIds)
+    }
+
     /// Clear all checkbox selections.
     func clearCheckedIds() {
         checkedIds = []
@@ -332,6 +339,8 @@ private final class MessageCellView: NSTableCellView {
     /// Whether the mouse is currently hovering over this cell.
     private var isHovering = false
     private var trackingArea: NSTrackingArea?
+    /// Width constraint for checkbox — 0 when hidden, nil (intrinsic) when visible.
+    private var checkboxWidthConstraint: NSLayoutConstraint?
 
     private static let dateFormatter: DateFormatter = {
         let f = DateFormatter()
@@ -389,6 +398,10 @@ private final class MessageCellView: NSTableCellView {
         unreadDot.wantsLayer = true
         unreadDot.layer?.backgroundColor = NSColor.controlAccentColor.cgColor
         unreadDot.layer?.cornerRadius = 4
+
+        // Checkbox width constraint — 0 when hidden, intrinsic when visible
+        checkboxWidthConstraint = checkbox.widthAnchor.constraint(equalToConstant: 0)
+        checkboxWidthConstraint?.isActive = true
 
         NSLayoutConstraint.activate([
             // Checkbox at the left edge
@@ -451,7 +464,10 @@ private final class MessageCellView: NSTableCellView {
     }
 
     private func updateCheckboxVisibility() {
-        checkbox.isHidden = !(alwaysShowCheckbox || isHovering)
+        let shouldShow = alwaysShowCheckbox || isHovering
+        checkbox.isHidden = !shouldShow
+        // Collapse width to 0 when hidden so it doesn't push content right
+        checkboxWidthConstraint?.isActive = !shouldShow
     }
 
     @objc private func checkboxClicked() {
