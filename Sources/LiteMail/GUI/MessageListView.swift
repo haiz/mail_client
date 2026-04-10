@@ -327,6 +327,12 @@ private final class MessageCellView: NSTableCellView {
     /// Called when the user clicks the checkbox.
     var onCheckboxToggled: (() -> Void)?
 
+    /// Whether checkboxes should always be visible (when any row is checked).
+    private var alwaysShowCheckbox = false
+    /// Whether the mouse is currently hovering over this cell.
+    private var isHovering = false
+    private var trackingArea: NSTrackingArea?
+
     private static let dateFormatter: DateFormatter = {
         let f = DateFormatter()
         f.doesRelativeDateFormatting = true
@@ -419,6 +425,35 @@ private final class MessageCellView: NSTableCellView {
         ])
     }
 
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let existing = trackingArea {
+            removeTrackingArea(existing)
+        }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        trackingArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovering = true
+        updateCheckboxVisibility()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovering = false
+        updateCheckboxVisibility()
+    }
+
+    private func updateCheckboxVisibility() {
+        checkbox.isHidden = !(alwaysShowCheckbox || isHovering)
+    }
+
     @objc private func checkboxClicked() {
         onCheckboxToggled?()
     }
@@ -445,8 +480,9 @@ private final class MessageCellView: NSTableCellView {
             threadBadge.isHidden = true
         }
 
-        // Checkbox visibility: show when any row is checked, hide when none are
-        checkbox.isHidden = !showCheckboxes
+        // Checkbox visibility: always visible when any row is checked, otherwise only on hover
+        alwaysShowCheckbox = showCheckboxes
         checkbox.state = isChecked ? .on : .off
+        updateCheckboxVisibility()
     }
 }
