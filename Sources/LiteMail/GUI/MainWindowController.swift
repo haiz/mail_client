@@ -10,6 +10,8 @@ final class MainWindowController: NSObject {
     let messageListView: MessageListView
     let detailView: DetailView
     let statusBar: StatusBar
+    let bulkActionBar = BulkActionBar()
+    let undoToastView = UndoToastView()
     private var commandPalette: CommandPalette?
     private var keyboardMonitor: Any?
 
@@ -49,9 +51,34 @@ final class MainWindowController: NSObject {
 
         super.init()
 
+        // Message list column: BulkActionBar on top, message list below, UndoToastView floating
+        let messageColumn = NSView()
+        bulkActionBar.translatesAutoresizingMaskIntoConstraints = false
+        messageListView.view.translatesAutoresizingMaskIntoConstraints = false
+        undoToastView.translatesAutoresizingMaskIntoConstraints = false
+        messageColumn.addSubview(bulkActionBar)
+        messageColumn.addSubview(messageListView.view)
+        messageColumn.addSubview(undoToastView)
+
+        NSLayoutConstraint.activate([
+            bulkActionBar.topAnchor.constraint(equalTo: messageColumn.topAnchor),
+            bulkActionBar.leadingAnchor.constraint(equalTo: messageColumn.leadingAnchor),
+            bulkActionBar.trailingAnchor.constraint(equalTo: messageColumn.trailingAnchor),
+
+            messageListView.view.topAnchor.constraint(equalTo: bulkActionBar.bottomAnchor),
+            messageListView.view.leadingAnchor.constraint(equalTo: messageColumn.leadingAnchor),
+            messageListView.view.trailingAnchor.constraint(equalTo: messageColumn.trailingAnchor),
+            messageListView.view.bottomAnchor.constraint(equalTo: messageColumn.bottomAnchor),
+
+            // Undo toast: centered, 8px above the bottom of the column, 240px wide
+            undoToastView.centerXAnchor.constraint(equalTo: messageColumn.centerXAnchor),
+            undoToastView.bottomAnchor.constraint(equalTo: messageColumn.bottomAnchor, constant: -8),
+            undoToastView.widthAnchor.constraint(equalToConstant: 240),
+        ])
+
         // Assemble split view
         splitView.addArrangedSubview(sidebarView.view)
-        splitView.addArrangedSubview(messageListView.view)
+        splitView.addArrangedSubview(messageColumn)
         splitView.addArrangedSubview(detailView.view)
 
         splitView.setHoldingPriority(.defaultHigh, forSubviewAt: 0)
@@ -60,7 +87,7 @@ final class MainWindowController: NSObject {
 
         // Set initial widths
         sidebarView.view.widthAnchor.constraint(greaterThanOrEqualToConstant: 180).isActive = true
-        messageListView.view.widthAnchor.constraint(greaterThanOrEqualToConstant: 280).isActive = true
+        messageColumn.widthAnchor.constraint(greaterThanOrEqualToConstant: 280).isActive = true
 
         // Main container with split view + status bar
         let mainContainer = NSView()
@@ -89,6 +116,44 @@ final class MainWindowController: NSObject {
         }
         messageListView.onMessageSelected = { [weak self] header in
             self?.onMessageSelected?(header)
+        }
+        messageListView.onCheckedIdsChanged = { [weak self] ids in
+            self?.bulkActionBar.update(selectedCount: ids.count)
+        }
+        bulkActionBar.onArchive = { [weak self] in
+            guard let self else { return }
+            let ids = Array(messageListView.checkedIds)
+            guard !ids.isEmpty else { return }
+            onAction?(.batchArchive(ids))
+        }
+        bulkActionBar.onDelete = { [weak self] in
+            guard let self else { return }
+            let ids = Array(messageListView.checkedIds)
+            guard !ids.isEmpty else { return }
+            onAction?(.batchDelete(ids))
+        }
+        bulkActionBar.onMarkRead = { [weak self] in
+            guard let self else { return }
+            let ids = Array(messageListView.checkedIds)
+            guard !ids.isEmpty else { return }
+            onAction?(.batchMarkRead(ids))
+        }
+        bulkActionBar.onStar = { [weak self] in
+            guard let self else { return }
+            let ids = Array(messageListView.checkedIds)
+            guard !ids.isEmpty else { return }
+            onAction?(.batchToggleStar(ids))
+        }
+        bulkActionBar.onMove = { [weak self] in
+            // Move requires folder selection — for now dispatch a placeholder;
+            // the caller can intercept via onAction if needed.
+            guard let self else { return }
+            let ids = Array(messageListView.checkedIds)
+            guard !ids.isEmpty else { return }
+            onAction?(.batchMove(ids, ""))
+        }
+        bulkActionBar.onDeselectAll = { [weak self] in
+            self?.messageListView.clearCheckedIds()
         }
 
         // Keyboard monitor — must retain the returned monitor object
@@ -136,6 +201,12 @@ final class MainWindowController: NSObject {
         // Cmd+K → command palette
         if event.modifierFlags.contains(.command) && event.charactersIgnoringModifiers == "k" {
             toggleCommandPalette()
+            return nil
+        }
+
+        // Cmd+Z → undo last batch action
+        if event.modifierFlags.contains(.command) && event.charactersIgnoringModifiers == "z" {
+            Task { @MainActor [weak self] in self?.undoToastView.performUndo() }
             return nil
         }
 
