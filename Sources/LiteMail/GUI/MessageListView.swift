@@ -247,7 +247,7 @@ final class MessageListView: NSObject {
 
     private func updateBulkBar() {
         let count = checkedIds.count
-        bulkActionBar.update(selectedCount: count)
+        bulkActionBar.update(selectedCount: count, totalCount: threadGroups.count)
         let targetHeight: CGFloat = count > 0 ? 36 : 0
         guard bulkBarHeightConstraint.constant != targetHeight else { return }
         NSAnimationContext.runAnimationGroup { ctx in

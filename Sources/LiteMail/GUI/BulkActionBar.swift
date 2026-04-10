@@ -139,8 +139,15 @@ final class BulkActionBar: NSView {
     // MARK: - Public API
 
     /// Show or hide the bar based on `selectedCount`, animating alpha.
-    func update(selectedCount: Int) {
+    /// `totalCount` is the total visible emails (for "Select All (N)" label).
+    func update(selectedCount: Int, totalCount: Int = 0) {
         countLabel.stringValue = "\(selectedCount) selected"
+        if totalCount > 0 && selectedCount < totalCount {
+            selectAllButton.title = "Select All (\(totalCount))"
+            selectAllButton.isHidden = false
+        } else {
+            selectAllButton.isHidden = true
+        }
 
         if selectedCount >= 1 {
             guard isHidden || alphaValue < 1 else { return }
