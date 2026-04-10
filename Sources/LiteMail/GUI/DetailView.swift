@@ -3,7 +3,7 @@ import WebKit
 
 /// Email detail view. Superhuman minimalism + Mimestream native feel.
 /// Uses WKWebView for HTML emails (with images), NSTextView for plain text.
-final class DetailView: NSObject {
+final class DetailView: NSObject, WKNavigationDelegate {
 
     let view: NSView
 
@@ -20,6 +20,7 @@ final class DetailView: NSObject {
     private let forwardButton: NSButton
     private let archiveButton: NSButton
     private let deleteButton: NSButton
+    private let moveButton: NSButton
     private let viewSourceButton: NSButton
     private let actionBar: NSStackView
 
@@ -38,14 +39,32 @@ final class DetailView: NSObject {
     private let emptyTitle = NSTextField(labelWithString: "No message selected")
     private let emptySubtitle = NSTextField(labelWithString: "Select an email to read it here\n\u{2318}K to search \u{2022} j/k to navigate")
 
+    // Bulk summary state
+    private let summaryContainer = NSView()
+    private let summaryIcon = NSImageView()
+    private let summaryTitle = NSTextField(labelWithString: "")
+    private let summaryList = NSTextField(labelWithString: "")
+
     // Callbacks
     var onReply: (() -> Void)?
     var onForward: (() -> Void)?
     var onArchive: (() -> Void)?
     var onDelete: (() -> Void)?
+    var onMove: ((String) -> Void)?
+
+    /// Available folders for the Move menu. Set by AppDelegate when displaying a message.
+    var availableFolders: [MailFolder] = []
+
+    // Attachment bar
+    private let attachmentBar: NSStackView
 
     // Store raw source for "View Source"
     private var rawSource: String?
+
+    /// Attachment info for the currently displayed email.
+    private var currentAttachments: [AttachmentInfo] = []
+    /// Callback to download attachment data by partId.
+    var onDownloadAttachment: ((AttachmentInfo) -> Void)?
 
     // Colors for avatar (deterministic by sender)
     private static let avatarColors: [NSColor] = [
@@ -69,8 +88,9 @@ final class DetailView: NSObject {
         forwardButton = CursorButton(image: NSImage(systemSymbolName: "arrowshape.turn.up.right.fill", accessibilityDescription: "Forward")!, target: nil, action: nil)
         archiveButton = CursorButton(image: NSImage(systemSymbolName: "archivebox.fill", accessibilityDescription: "Archive")!, target: nil, action: nil)
         deleteButton = CursorButton(image: NSImage(systemSymbolName: "trash.fill", accessibilityDescription: "Delete")!, target: nil, action: nil)
+        moveButton = CursorButton(image: NSImage(systemSymbolName: "folder.fill", accessibilityDescription: "Move to Folder")!, target: nil, action: nil)
 
-        for btn in [replyButton, forwardButton, archiveButton, deleteButton] {
+        for btn in [replyButton, forwardButton, archiveButton, deleteButton, moveButton] {
             btn.bezelStyle = .accessoryBarAction
             btn.isBordered = false
             btn.contentTintColor = .labelColor
@@ -85,8 +105,14 @@ final class DetailView: NSObject {
         viewSourceButton.widthAnchor.constraint(equalToConstant: 28).isActive = true
         viewSourceButton.heightAnchor.constraint(equalToConstant: 28).isActive = true
 
-        actionBar = NSStackView(views: [replyButton, forwardButton, archiveButton, deleteButton, viewSourceButton])
+        actionBar = NSStackView(views: [replyButton, forwardButton, archiveButton, deleteButton, moveButton, viewSourceButton])
         actionBar.spacing = 4
+
+        // Attachment bar
+        attachmentBar = NSStackView()
+        attachmentBar.orientation = .horizontal
+        attachmentBar.spacing = 8
+        attachmentBar.isHidden = true
 
         // Body
         bodyTextView = LinkCursorTextView()
@@ -117,6 +143,7 @@ final class DetailView: NSObject {
         forwardButton.target = self; forwardButton.action = #selector(forwardClicked)
         archiveButton.target = self; archiveButton.action = #selector(archiveClicked)
         deleteButton.target = self; deleteButton.action = #selector(deleteClicked)
+        moveButton.target = self; moveButton.action = #selector(moveClicked)
         viewSourceButton.target = self; viewSourceButton.action = #selector(viewSourceClicked)
 
         setupLayout()
@@ -128,7 +155,8 @@ final class DetailView: NSObject {
     private func setupLayout() {
         let allViews: [NSView] = [
             subjectLabel, avatarCircle, avatarLabel, senderLabel, dateLabel,
-            recipientLabel, actionBar, headerSeparator, bodyScrollView, emptyContainer,
+            recipientLabel, actionBar, headerSeparator, attachmentBar, bodyScrollView, emptyContainer,
+            summaryContainer,
         ]
         for v in allViews {
             v.translatesAutoresizingMaskIntoConstraints = false
@@ -200,6 +228,41 @@ final class DetailView: NSObject {
             emptySubtitle.widthAnchor.constraint(lessThanOrEqualToConstant: 250),
         ])
 
+        // Bulk summary state
+        summaryIcon.image = NSImage(systemSymbolName: "checkmark.circle", accessibilityDescription: nil)
+        summaryIcon.contentTintColor = .tertiaryLabelColor
+        summaryIcon.symbolConfiguration = .init(pointSize: 40, weight: .ultraLight)
+        summaryIcon.translatesAutoresizingMaskIntoConstraints = false
+
+        summaryTitle.font = .systemFont(ofSize: 18, weight: .medium)
+        summaryTitle.textColor = .secondaryLabelColor
+        summaryTitle.alignment = .center
+        summaryTitle.translatesAutoresizingMaskIntoConstraints = false
+
+        summaryList.font = .systemFont(ofSize: 12)
+        summaryList.textColor = .tertiaryLabelColor
+        summaryList.alignment = .center
+        summaryList.maximumNumberOfLines = 6
+        summaryList.lineBreakMode = .byWordWrapping
+        summaryList.translatesAutoresizingMaskIntoConstraints = false
+
+        summaryContainer.addSubview(summaryIcon)
+        summaryContainer.addSubview(summaryTitle)
+        summaryContainer.addSubview(summaryList)
+        summaryContainer.isHidden = true
+
+        NSLayoutConstraint.activate([
+            summaryIcon.centerXAnchor.constraint(equalTo: summaryContainer.centerXAnchor),
+            summaryIcon.centerYAnchor.constraint(equalTo: summaryContainer.centerYAnchor, constant: -50),
+            summaryIcon.widthAnchor.constraint(equalToConstant: 48),
+            summaryIcon.heightAnchor.constraint(equalToConstant: 48),
+            summaryTitle.topAnchor.constraint(equalTo: summaryIcon.bottomAnchor, constant: 12),
+            summaryTitle.centerXAnchor.constraint(equalTo: summaryContainer.centerXAnchor),
+            summaryList.topAnchor.constraint(equalTo: summaryTitle.bottomAnchor, constant: 10),
+            summaryList.centerXAnchor.constraint(equalTo: summaryContainer.centerXAnchor),
+            summaryList.widthAnchor.constraint(lessThanOrEqualToConstant: 300),
+        ])
+
         // Main layout
         NSLayoutConstraint.activate([
             // Subject
@@ -236,8 +299,13 @@ final class DetailView: NSObject {
             headerSeparator.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 28),
             headerSeparator.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -28),
 
+            // Attachment bar (below header separator, hidden when no attachments)
+            attachmentBar.topAnchor.constraint(equalTo: headerSeparator.bottomAnchor, constant: 8),
+            attachmentBar.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 28),
+            attachmentBar.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -28),
+
             // Body
-            bodyScrollView.topAnchor.constraint(equalTo: headerSeparator.bottomAnchor, constant: 16),
+            bodyScrollView.topAnchor.constraint(equalTo: attachmentBar.bottomAnchor, constant: 8),
             bodyScrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 28),
             bodyScrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -28),
             bodyScrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -16),
@@ -247,13 +315,20 @@ final class DetailView: NSObject {
             emptyContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             emptyContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             emptyContainer.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+
+            // Bulk summary state
+            summaryContainer.topAnchor.constraint(equalTo: view.topAnchor),
+            summaryContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            summaryContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            summaryContainer.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
     }
 
     // MARK: - Display
 
-    func display(header: EmailHeader, body: EmailBody?) {
+    func display(header: EmailHeader, body: EmailBody?, isLoading: Bool = false) {
         emptyContainer.isHidden = true
+        summaryContainer.isHidden = true
         for v in [subjectLabel, avatarCircle, avatarLabel, senderLabel, dateLabel, recipientLabel, actionBar, headerSeparator, bodyScrollView] as [NSView] {
             v.isHidden = false
         }
@@ -292,6 +367,15 @@ final class DetailView: NSObject {
             bodyScrollView.isHidden = false
             bodyTextView.textStorage?.setAttributedString(Self.renderPlainText(textBody))
             bodyTextView.scrollToBeginningOfDocument(nil)
+        } else if isLoading {
+            hideWebView()
+            bodyTextView.isHidden = false
+            bodyScrollView.isHidden = false
+            let loadingAttrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 14),
+                .foregroundColor: NSColor.tertiaryLabelColor,
+            ]
+            bodyTextView.textStorage?.setAttributedString(NSAttributedString(string: "Loading…", attributes: loadingAttrs))
         } else {
             hideWebView()
             bodyTextView.isHidden = false
@@ -300,13 +384,73 @@ final class DetailView: NSObject {
         }
     }
 
+    /// Show attachment chips below the header.
+    func displayAttachments(_ attachments: [AttachmentInfo]) {
+        currentAttachments = attachments
+        // Clear old chips
+        attachmentBar.arrangedSubviews.forEach { $0.removeFromSuperview() }
+
+        guard !attachments.isEmpty else {
+            attachmentBar.isHidden = true
+            return
+        }
+        attachmentBar.isHidden = false
+
+        for (index, att) in attachments.enumerated() {
+            let icon = NSImage(systemSymbolName: "paperclip", accessibilityDescription: nil) ?? NSImage()
+            let name = att.filename ?? "Attachment"
+            let sizeStr = att.sizeBytes.map { Self.formatFileSize($0) } ?? ""
+            let title = sizeStr.isEmpty ? name : "\(name) (\(sizeStr))"
+
+            let chip = CursorButton(title: title, target: self, action: #selector(attachmentChipClicked(_:)))
+            chip.image = icon
+            chip.imagePosition = .imageLeading
+            chip.bezelStyle = .accessoryBarAction
+            chip.font = .systemFont(ofSize: 11)
+            chip.tag = index
+            attachmentBar.addArrangedSubview(chip)
+        }
+    }
+
+    @objc private func attachmentChipClicked(_ sender: NSButton) {
+        let index = sender.tag
+        guard index >= 0, index < currentAttachments.count else { return }
+        onDownloadAttachment?(currentAttachments[index])
+    }
+
     func clear() { showEmpty() }
 
     private func showEmpty() {
         emptyContainer.isHidden = false
+        summaryContainer.isHidden = true
         for v in [subjectLabel, avatarCircle, avatarLabel, senderLabel, dateLabel, recipientLabel, actionBar, headerSeparator, bodyScrollView] as [NSView] {
             v.isHidden = true
         }
+    }
+
+    /// Show bulk selection summary for the given email headers.
+    func showBulkSummary(headers: [EmailHeader]) {
+        let count = headers.count
+        summaryTitle.stringValue = "\(count) conversation\(count == 1 ? "" : "s") selected"
+
+        let preview = headers.prefix(5).map { h -> String in
+            let sender = h.senderName ?? h.senderEmail
+            let subject = h.subject ?? "(no subject)"
+            return "\(sender) — \(subject)"
+        }.joined(separator: "\n")
+        summaryList.stringValue = preview
+
+        summaryContainer.isHidden = false
+        emptyContainer.isHidden = true
+        for v in [subjectLabel, avatarCircle, avatarLabel, senderLabel, dateLabel, recipientLabel, actionBar, headerSeparator, bodyScrollView] as [NSView] {
+            v.isHidden = true
+        }
+        hideWebView()
+    }
+
+    /// Hide the bulk selection summary (email content shown by normal display flow).
+    func hideBulkSummary() {
+        summaryContainer.isHidden = true
     }
 
     // MARK: - WebView
@@ -317,6 +461,7 @@ final class DetailView: NSObject {
             config.preferences.isElementFullscreenEnabled = false
             let wv = WKWebView(frame: .zero, configuration: config)
             wv.translatesAutoresizingMaskIntoConstraints = false
+            wv.navigationDelegate = self
             // White background — emails are designed for light backgrounds (like Apple Mail)
             wv.setValue(true, forKey: "drawsBackground")
             view.addSubview(wv)
@@ -357,6 +502,18 @@ final class DetailView: NSObject {
         webView?.isHidden = true
     }
 
+    // MARK: - WKNavigationDelegate
+
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        // Allow initial load; open all link clicks in the default browser
+        if navigationAction.navigationType == .linkActivated, let url = navigationAction.request.url {
+            NSWorkspace.shared.open(url)
+            decisionHandler(.cancel)
+        } else {
+            decisionHandler(.allow)
+        }
+    }
+
     // MARK: - View Source
 
     func viewSource() {
@@ -389,6 +546,38 @@ final class DetailView: NSObject {
     @objc private func archiveClicked() { onArchive?() }
     @objc private func deleteClicked() { onDelete?() }
     @objc private func viewSourceClicked() { viewSource() }
+
+    func printEmail() {
+        if let wv = webView, !wv.isHidden {
+            let printInfo = NSPrintInfo.shared
+            let printOp = wv.printOperation(with: printInfo)
+            printOp.showsPrintPanel = true
+            printOp.showsProgressPanel = true
+            printOp.run()
+        } else {
+            let printInfo = NSPrintInfo.shared
+            let printOp = NSPrintOperation(view: bodyScrollView, printInfo: printInfo)
+            printOp.showsPrintPanel = true
+            printOp.run()
+        }
+    }
+
+    @objc private func moveClicked() {
+        guard !availableFolders.isEmpty else { return }
+        let menu = NSMenu()
+        for folder in availableFolders {
+            let item = NSMenuItem(title: folder.name, action: #selector(moveFolderSelected(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = folder.id
+            menu.addItem(item)
+        }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: moveButton.bounds.height), in: moveButton)
+    }
+
+    @objc private func moveFolderSelected(_ sender: NSMenuItem) {
+        guard let folderId = sender.representedObject as? String else { return }
+        onMove?(folderId)
+    }
 
     // MARK: - Text Rendering
 
@@ -500,6 +689,12 @@ final class DetailView: NSObject {
         f.dateStyle = .medium
         f.timeStyle = .short
         return f.string(from: date)
+    }
+
+    private static func formatFileSize(_ bytes: Int) -> String {
+        if bytes < 1024 { return "\(bytes) B" }
+        if bytes < 1024 * 1024 { return "\(bytes / 1024) KB" }
+        return String(format: "%.1f MB", Double(bytes) / (1024 * 1024))
     }
 
     private static func avatarColor(for email: String) -> NSColor {

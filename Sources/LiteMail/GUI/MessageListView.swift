@@ -20,6 +20,16 @@ final class MessageListView: NSObject {
     var onSearchChanged: ((String) -> Void)?
     var onCheckedIdsChanged: ((Set<Int64>) -> Void)?
 
+    /// The name of the currently displayed folder, used for the empty state subtitle.
+    var currentFolderName: String = "Inbox" {
+        didSet { updateEmptyState() }
+    }
+
+    // Empty state overlay
+    private let emptyStateView = NSView()
+    private let emptyTitleLabel = NSTextField(labelWithString: "All caught up")
+    private let emptySubtitleLabel = NSTextField(labelWithString: "")
+
     /// Set of email IDs the user has checked via checkboxes.
     private(set) var checkedIds: Set<Int64> = []
 
@@ -87,6 +97,46 @@ final class MessageListView: NSObject {
         searchField.delegate = self
         searchField.target = self
         searchField.action = #selector(searchFieldChanged)
+
+        setupEmptyState(in: container)
+    }
+
+    private func setupEmptyState(in container: NSView) {
+        emptyStateView.translatesAutoresizingMaskIntoConstraints = false
+        emptyStateView.isHidden = true
+        container.addSubview(emptyStateView)
+
+        emptyTitleLabel.font = .systemFont(ofSize: 16, weight: .medium)
+        emptyTitleLabel.textColor = .secondaryLabelColor
+        emptyTitleLabel.alignment = .center
+        emptyTitleLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        emptySubtitleLabel.font = .systemFont(ofSize: 13)
+        emptySubtitleLabel.textColor = .secondaryLabelColor
+        emptySubtitleLabel.alignment = .center
+        emptySubtitleLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        emptyStateView.addSubview(emptyTitleLabel)
+        emptyStateView.addSubview(emptySubtitleLabel)
+
+        NSLayoutConstraint.activate([
+            // Overlay the scroll view area (below search field)
+            emptyStateView.topAnchor.constraint(equalTo: scrollView.topAnchor),
+            emptyStateView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            emptyStateView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            emptyStateView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+
+            emptyTitleLabel.centerXAnchor.constraint(equalTo: emptyStateView.centerXAnchor),
+            emptyTitleLabel.centerYAnchor.constraint(equalTo: emptyStateView.centerYAnchor, constant: -10),
+
+            emptySubtitleLabel.topAnchor.constraint(equalTo: emptyTitleLabel.bottomAnchor, constant: 6),
+            emptySubtitleLabel.centerXAnchor.constraint(equalTo: emptyStateView.centerXAnchor),
+        ])
+    }
+
+    private func updateEmptyState() {
+        emptySubtitleLabel.stringValue = "No emails in \(currentFolderName)"
+        emptyStateView.isHidden = !threadGroups.isEmpty
     }
 
     func update(messages: [EmailHeader]) {
@@ -94,6 +144,7 @@ final class MessageListView: NSObject {
         self.messages = messages
         self.threadGroups = Self.groupByThread(messages)
         tableView.reloadData()
+        updateEmptyState()
 
         // Restore selection to the same email, or fall back to row 0
         if let prevId = previouslySelectedId,

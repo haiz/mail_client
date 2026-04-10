@@ -24,6 +24,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.currentAccountId = accountId
             self?.currentFolder = folder
             self?.displayedEmailId = nil
+            self?.windowController?.messageListView.currentFolderName = folder
             self?.loadMessages()
         }
         wc.onMessageSelected = { [weak self] header in
@@ -34,6 +35,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         wc.messageListView.onSearchChanged = { [weak self] query in
             self?.performSearch(query: query)
+        }
+        wc.messageListView.onCheckedIdsChanged = { [weak self] checkedIds in
+            guard let self, let wc = self.windowController else { return }
+            if checkedIds.count >= 2 {
+                let headers = wc.messageListView.threadGroups
+                    .filter { checkedIds.contains($0.primaryHeader.id) }
+                    .map(\.primaryHeader)
+                wc.detailView.showBulkSummary(headers: headers)
+            } else {
+                wc.detailView.hideBulkSummary()
+            }
         }
         wc.sidebarView.onAccountSwitched = { [weak self] accountId in
             self?.switchAccount(accountId)
