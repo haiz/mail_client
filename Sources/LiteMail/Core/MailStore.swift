@@ -1,10 +1,24 @@
 import Foundation
 import GRDB
 
+/// Wraps a DatabaseReader for concurrent access from outside the MailStore actor.
+/// Safe because GRDB's WAL mode supports concurrent readers alongside writes.
+struct ConcurrentDBReader: @unchecked Sendable {
+    fileprivate let reader: any DatabaseReader
+
+    func read<T>(_ block: (Database) throws -> T) throws -> T {
+        try reader.read(block)
+    }
+}
+
 /// Actor that owns all SQLite/GRDB access. Serial access prevents write conflicts.
 /// Uses WAL mode for concurrent reads during sync (file-based DBs only).
 actor MailStore {
     private let dbPool: any DatabaseWriter & DatabaseReader
+
+    /// Concurrent reader that bypasses actor serialization for read-only queries.
+    /// Stored as `let` of a `Sendable` type so it's nonisolated (SE-0327).
+    let concurrentReader: ConcurrentDBReader
 
     init(path: String) throws {
         var config = Configuration()
@@ -20,6 +34,7 @@ actor MailStore {
         } else {
             dbPool = try DatabasePool(path: path, configuration: config)
         }
+        concurrentReader = ConcurrentDBReader(reader: dbPool)
         try migrate()
     }
 
@@ -240,6 +255,12 @@ actor MailStore {
             """)
         }
 
+        migrator.registerMigration("v6_attachment_part_id") { db in
+            try db.alter(table: "attachments") { t in
+                t.add(column: "part_id", .text)
+            }
+        }
+
         try migrator.migrate(dbPool)
     }
 
@@ -366,6 +387,7 @@ actor MailStore {
         try dbPool.read { db in
             try EmailRecord
                 .filter(Column("thread_id") == threadId)
+                .filter(Column("is_deleted") == false)
                 .order(Column("date").asc)
                 .fetchAll(db)
         }
@@ -422,6 +444,54 @@ actor MailStore {
     func moveEmail(emailId: Int64, toFolder: String) throws {
         try dbPool.write { db in
             try db.execute(sql: "UPDATE emails SET folder = ? WHERE id = ?", arguments: [toFolder, emailId])
+        }
+    }
+
+    // MARK: - Attachments
+
+    func insertAttachments(_ attachments: [AttachmentRecord]) throws {
+        guard !attachments.isEmpty else { return }
+        try dbPool.write { db in
+            for var att in attachments {
+                try att.insert(db)
+            }
+        }
+    }
+
+    func fetchAttachments(emailId: Int64) throws -> [AttachmentRecord] {
+        try dbPool.read { db in
+            try AttachmentRecord.filter(Column("email_id") == emailId).fetchAll(db)
+        }
+    }
+
+    // MARK: - Labels
+
+    func addLabel(emailId: Int64, label: String) throws {
+        try dbPool.write { db in
+            try db.execute(sql: "INSERT OR IGNORE INTO labels (email_id, label) VALUES (?, ?)", arguments: [emailId, label])
+        }
+    }
+
+    func removeLabel(emailId: Int64, label: String) throws {
+        try dbPool.write { db in
+            try db.execute(sql: "DELETE FROM labels WHERE email_id = ? AND label = ?", arguments: [emailId, label])
+        }
+    }
+
+    func fetchLabels(emailId: Int64) throws -> [String] {
+        try dbPool.read { db in
+            try String.fetchAll(db, sql: "SELECT label FROM labels WHERE email_id = ?", arguments: [emailId])
+        }
+    }
+
+    func allLabels(accountId: String) throws -> [String] {
+        try dbPool.read { db in
+            try String.fetchAll(db, sql: """
+                SELECT DISTINCT l.label FROM labels l
+                JOIN emails e ON l.email_id = e.id
+                WHERE e.account_id = ?
+                ORDER BY l.label
+            """, arguments: [accountId])
         }
     }
 
@@ -682,5 +752,29 @@ struct OutboxRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         case inReplyTo = "in_reply_to"
         case createdAt = "created_at"
         case accountId = "account_id"
+    }
+}
+
+struct AttachmentRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
+    static let databaseTableName = "attachments"
+
+    var id: Int64?
+    var emailId: Int64
+    var partId: String?
+    var filename: String?
+    var mimeType: String?
+    var sizeBytes: Int?
+    var contentId: String?
+    var cachePath: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case emailId = "email_id"
+        case partId = "part_id"
+        case filename
+        case mimeType = "mime_type"
+        case sizeBytes = "size_bytes"
+        case contentId = "content_id"
+        case cachePath = "cache_path"
     }
 }
