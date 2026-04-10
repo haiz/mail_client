@@ -115,7 +115,7 @@ final class BulkActionBar: NSView {
             stackView.trailingAnchor.constraint(equalTo: trailingAnchor),
             stackView.bottomAnchor.constraint(equalTo: bottomAnchor),
 
-            heightAnchor.constraint(equalToConstant: 36),
+            // Height is controlled externally by MessageListView's bulkBarHeightConstraint
         ])
 
         // Wire button targets

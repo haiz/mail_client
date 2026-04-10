@@ -15,6 +15,8 @@ final class MessageListView: NSObject {
     private let scrollView: NSScrollView
     let tableView: NSTableView
     private let searchField: NSSearchField
+    let bulkActionBar = BulkActionBar()
+    private var bulkBarHeightConstraint: NSLayoutConstraint!
 
     var onMessageSelected: ((EmailHeader) -> Void)?
     var onSearchChanged: ((String) -> Void)?
@@ -73,8 +75,13 @@ final class MessageListView: NSObject {
 
         // Container
         let container = NSView()
+        bulkActionBar.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(searchField)
+        container.addSubview(bulkActionBar)
         container.addSubview(scrollView)
+
+        // BulkActionBar height: 0 when hidden, 36 when visible
+        bulkBarHeightConstraint = bulkActionBar.heightAnchor.constraint(equalToConstant: 0)
 
         NSLayoutConstraint.activate([
             searchField.topAnchor.constraint(equalTo: container.topAnchor, constant: 8),
@@ -82,7 +89,12 @@ final class MessageListView: NSObject {
             searchField.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
             searchField.heightAnchor.constraint(equalToConstant: 28),
 
-            scrollView.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 8),
+            bulkActionBar.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 4),
+            bulkActionBar.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            bulkActionBar.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            bulkBarHeightConstraint,
+
+            scrollView.topAnchor.constraint(equalTo: bulkActionBar.bottomAnchor, constant: 4),
             scrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             scrollView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
@@ -200,6 +212,7 @@ final class MessageListView: NSObject {
         tableView.removeRows(at: indices, withAnimation: .effectFade)
         tableView.endUpdates()
 
+        updateBulkBar()
         onCheckedIdsChanged?(checkedIds)
         updateEmptyState()
     }
@@ -208,6 +221,7 @@ final class MessageListView: NSObject {
     func selectAllChecked() {
         checkedIds = Set(threadGroups.map { $0.primaryHeader.id })
         tableView.reloadData()
+        updateBulkBar()
         onCheckedIdsChanged?(checkedIds)
     }
 
@@ -215,6 +229,7 @@ final class MessageListView: NSObject {
     func clearCheckedIds() {
         checkedIds = []
         tableView.reloadData()
+        updateBulkBar()
         onCheckedIdsChanged?(checkedIds)
     }
 
@@ -226,7 +241,21 @@ final class MessageListView: NSObject {
             checkedIds.insert(emailId)
         }
         tableView.reloadData()
+        updateBulkBar()
         onCheckedIdsChanged?(checkedIds)
+    }
+
+    private func updateBulkBar() {
+        let count = checkedIds.count
+        bulkActionBar.update(selectedCount: count)
+        let targetHeight: CGFloat = count > 0 ? 36 : 0
+        guard bulkBarHeightConstraint.constant != targetHeight else { return }
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.15
+            ctx.allowsImplicitAnimation = true
+            bulkBarHeightConstraint.constant = targetHeight
+            view.layoutSubtreeIfNeeded()
+        }
     }
 
     /// Group messages by threadId. Messages without a threadId get their own group.

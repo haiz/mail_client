@@ -10,7 +10,6 @@ final class MainWindowController: NSObject {
     let messageListView: MessageListView
     let detailView: DetailView
     let statusBar: StatusBar
-    let bulkActionBar = BulkActionBar()
     let undoToastView = UndoToastView()
     private var commandPalette: CommandPalette?
     private var keyboardMonitor: Any?
@@ -51,21 +50,15 @@ final class MainWindowController: NSObject {
 
         super.init()
 
-        // Message list column: BulkActionBar on top, message list below, UndoToastView floating
+        // Message list column: message list (contains BulkActionBar internally) + UndoToastView floating
         let messageColumn = NSView()
-        bulkActionBar.translatesAutoresizingMaskIntoConstraints = false
         messageListView.view.translatesAutoresizingMaskIntoConstraints = false
         undoToastView.translatesAutoresizingMaskIntoConstraints = false
         messageColumn.addSubview(messageListView.view)
-        messageColumn.addSubview(bulkActionBar)
         messageColumn.addSubview(undoToastView)
 
         NSLayoutConstraint.activate([
-            bulkActionBar.topAnchor.constraint(equalTo: messageColumn.topAnchor),
-            bulkActionBar.leadingAnchor.constraint(equalTo: messageColumn.leadingAnchor),
-            bulkActionBar.trailingAnchor.constraint(equalTo: messageColumn.trailingAnchor),
-
-            messageListView.view.topAnchor.constraint(equalTo: bulkActionBar.bottomAnchor),
+            messageListView.view.topAnchor.constraint(equalTo: messageColumn.topAnchor),
             messageListView.view.leadingAnchor.constraint(equalTo: messageColumn.leadingAnchor),
             messageListView.view.trailingAnchor.constraint(equalTo: messageColumn.trailingAnchor),
             messageListView.view.bottomAnchor.constraint(equalTo: messageColumn.bottomAnchor),
@@ -117,34 +110,31 @@ final class MainWindowController: NSObject {
         messageListView.onMessageSelected = { [weak self] header in
             self?.onMessageSelected?(header)
         }
-        messageListView.onCheckedIdsChanged = { [weak self] ids in
-            self?.bulkActionBar.update(selectedCount: ids.count)
-        }
-        bulkActionBar.onArchive = { [weak self] in
+        messageListView.bulkActionBar.onArchive = { [weak self] in
             guard let self else { return }
             let ids = Array(messageListView.checkedIds)
             guard !ids.isEmpty else { return }
             onAction?(.batchArchive(ids))
         }
-        bulkActionBar.onDelete = { [weak self] in
+        messageListView.bulkActionBar.onDelete = { [weak self] in
             guard let self else { return }
             let ids = Array(messageListView.checkedIds)
             guard !ids.isEmpty else { return }
             onAction?(.batchDelete(ids))
         }
-        bulkActionBar.onMarkRead = { [weak self] in
+        messageListView.bulkActionBar.onMarkRead = { [weak self] in
             guard let self else { return }
             let ids = Array(messageListView.checkedIds)
             guard !ids.isEmpty else { return }
             onAction?(.batchMarkRead(ids))
         }
-        bulkActionBar.onStar = { [weak self] in
+        messageListView.bulkActionBar.onStar = { [weak self] in
             guard let self else { return }
             let ids = Array(messageListView.checkedIds)
             guard !ids.isEmpty else { return }
             onAction?(.batchToggleStar(ids))
         }
-        bulkActionBar.onMove = { [weak self] in
+        messageListView.bulkActionBar.onMove = { [weak self] in
             // Move requires folder selection — for now dispatch a placeholder;
             // the caller can intercept via onAction if needed.
             guard let self else { return }
@@ -152,10 +142,10 @@ final class MainWindowController: NSObject {
             guard !ids.isEmpty else { return }
             onAction?(.batchMove(ids, ""))
         }
-        bulkActionBar.onSelectAll = { [weak self] in
+        messageListView.bulkActionBar.onSelectAll = { [weak self] in
             self?.messageListView.selectAllChecked()
         }
-        bulkActionBar.onDeselectAll = { [weak self] in
+        messageListView.bulkActionBar.onDeselectAll = { [weak self] in
             self?.messageListView.clearCheckedIds()
         }
 
