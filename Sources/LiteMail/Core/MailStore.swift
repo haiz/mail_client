@@ -562,7 +562,7 @@ actor MailStore {
                     sql: "UPDATE emails SET delete_state = 'pending_delete' WHERE id = ?",
                     arguments: [id]
                 )
-                var job = DeleteJobRecord(
+                let job = DeleteJobRecord(
                     id: nil, accountId: accId, emailId: id,
                     folder: rec.folder, uid: uid,
                     state: "queued", attempts: 0, lastError: nil,
