@@ -582,6 +582,92 @@ actor MailStore {
         }
     }
 
+    func fetchDueDeleteJobs(now: Int, limit: Int) throws -> [DeleteJobRecord] {
+        try dbPool.read { db in
+            try DeleteJobRecord
+                .filter(Column("state") == "queued" && Column("next_attempt_at") <= now)
+                .order(Column("next_attempt_at").asc)
+                .limit(limit)
+                .fetchAll(db)
+        }
+    }
+
+    func markDeleteJobsRunning(jobIds: [Int64]) throws {
+        guard !jobIds.isEmpty else { return }
+        let placeholders = jobIds.map { _ in "?" }.joined(separator: ",")
+        let args = jobIds.map { $0 as DatabaseValueConvertible }
+        try dbPool.write { db in
+            try db.execute(
+                sql: "UPDATE delete_jobs SET state='running' WHERE id IN (\(placeholders))",
+                arguments: StatementArguments(args)
+            )
+        }
+    }
+
+    func succeedDeleteJobs(jobIds: [Int64]) throws {
+        guard !jobIds.isEmpty else { return }
+        let placeholders = jobIds.map { _ in "?" }.joined(separator: ",")
+        let args = jobIds.map { $0 as DatabaseValueConvertible }
+        try dbPool.write { db in
+            try db.execute(
+                sql: """
+                    DELETE FROM emails WHERE id IN (
+                        SELECT email_id FROM delete_jobs WHERE id IN (\(placeholders))
+                    )
+                """,
+                arguments: StatementArguments(args)
+            )
+            try db.execute(
+                sql: "DELETE FROM delete_jobs WHERE id IN (\(placeholders))",
+                arguments: StatementArguments(args)
+            )
+        }
+    }
+
+    func failDeleteJobsTransient(jobIds: [Int64], now: Int, error: String) throws {
+        guard !jobIds.isEmpty else { return }
+        try dbPool.write { db in
+            for id in jobIds {
+                guard var job = try DeleteJobRecord.fetchOne(db, key: id) else { continue }
+                job.attempts += 1
+                job.lastError = error
+                let delay = min(300, Int(pow(2.0, Double(job.attempts))))
+                job.nextAttemptAt = now + delay
+                job.state = "queued"
+                try job.update(db)
+            }
+        }
+    }
+
+    func failDeleteJobsPermanent(jobIds: [Int64], error: String) throws {
+        guard !jobIds.isEmpty else { return }
+        let placeholders = jobIds.map { _ in "?" }.joined(separator: ",")
+        let args = jobIds.map { $0 as DatabaseValueConvertible }
+        try dbPool.write { db in
+            try db.execute(
+                sql: """
+                    UPDATE emails SET delete_state='delete_failed' WHERE id IN (
+                        SELECT email_id FROM delete_jobs WHERE id IN (\(placeholders))
+                    )
+                """,
+                arguments: StatementArguments(args)
+            )
+            var a: [DatabaseValueConvertible] = [error]
+            a += args
+            try db.execute(
+                sql: "UPDATE delete_jobs SET state='failed', last_error=? WHERE id IN (\(placeholders))",
+                arguments: StatementArguments(a)
+            )
+        }
+    }
+
+    /// Called on app startup: any 'running' job from a prior crashed run is put back to 'queued'.
+    func resetRunningDeleteJobs() throws {
+        try dbPool.write { db in
+            try db.execute(sql: "UPDATE delete_jobs SET state='queued' WHERE state='running'")
+        }
+    }
+
     // MARK: - Attachments
 
     func insertAttachments(_ attachments: [AttachmentRecord]) throws {

@@ -177,4 +177,92 @@ final class MailStoreBatchTests: XCTestCase {
         }
         XCTAssertEqual(jobCount, 0)
     }
+
+    // MARK: - Queue Dequeue + Completion
+
+    func testFetchDueDeleteJobsReturnsQueuedAndDue() async throws {
+        let ids = try await insertTestEmails(count: 2, folder: "INBOX")
+        let recs = try await store.fetchEmailRecords(ids: ids)
+        try await store.enqueueDeletes(records: recs, now: 100)
+
+        // Not due yet
+        let empty = try await store.fetchDueDeleteJobs(now: 99, limit: 10)
+        XCTAssertTrue(empty.isEmpty)
+
+        // Due
+        let due = try await store.fetchDueDeleteJobs(now: 100, limit: 10)
+        XCTAssertEqual(due.count, 2)
+        XCTAssertEqual(Set(due.map { $0.state }), ["queued"])
+    }
+
+    func testMarkJobRunningThenSucceededHardDeletesEmail() async throws {
+        let ids = try await insertTestEmails(count: 1, folder: "INBOX")
+        let recs = try await store.fetchEmailRecords(ids: ids)
+        try await store.enqueueDeletes(records: recs, now: 100)
+        let jobs = try await store.fetchDueDeleteJobs(now: 100, limit: 10)
+        let job = jobs[0]
+
+        try await store.markDeleteJobsRunning(jobIds: [job.id!])
+        try await store.succeedDeleteJobs(jobIds: [job.id!])
+
+        let emailCount: Int = try await store.concurrentReader.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM emails WHERE id=?", arguments: [ids[0]]) ?? -1
+        }
+        XCTAssertEqual(emailCount, 0, "email row should be hard-deleted on success")
+        let jobCount: Int = try await store.concurrentReader.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM delete_jobs") ?? -1
+        }
+        XCTAssertEqual(jobCount, 0, "job row should be removed on success")
+    }
+
+    func testFailTransientReschedulesAndIncrementsAttempts() async throws {
+        let ids = try await insertTestEmails(count: 1)
+        let recs = try await store.fetchEmailRecords(ids: ids)
+        try await store.enqueueDeletes(records: recs, now: 100)
+        let job = try await store.fetchDueDeleteJobs(now: 100, limit: 10)[0]
+        try await store.markDeleteJobsRunning(jobIds: [job.id!])
+
+        try await store.failDeleteJobsTransient(jobIds: [job.id!], now: 100, error: "timeout")
+
+        let updated: DeleteJobRecord? = try await store.concurrentReader.read { db in
+            try DeleteJobRecord.fetchOne(db, key: job.id!)
+        }
+        XCTAssertEqual(updated?.state, "queued")
+        XCTAssertEqual(updated?.attempts, 1)
+        XCTAssertEqual(updated?.lastError, "timeout")
+        XCTAssertGreaterThan(updated?.nextAttemptAt ?? 0, 100)
+    }
+
+    func testFailPermanentMarksEmailDeleteFailed() async throws {
+        let ids = try await insertTestEmails(count: 1)
+        let recs = try await store.fetchEmailRecords(ids: ids)
+        try await store.enqueueDeletes(records: recs, now: 100)
+        let job = try await store.fetchDueDeleteJobs(now: 100, limit: 10)[0]
+
+        try await store.failDeleteJobsPermanent(jobIds: [job.id!], error: "auth denied")
+
+        let state: String? = try await store.concurrentReader.read { db in
+            try String.fetchOne(db, sql: "SELECT delete_state FROM emails WHERE id=?", arguments: [ids[0]])
+        }
+        XCTAssertEqual(state, "delete_failed")
+        let jobState: String? = try await store.concurrentReader.read { db in
+            try String.fetchOne(db, sql: "SELECT state FROM delete_jobs WHERE id=?", arguments: [job.id!])
+        }
+        XCTAssertEqual(jobState, "failed")
+    }
+
+    func testResetRunningJobsOnStartup() async throws {
+        let ids = try await insertTestEmails(count: 1)
+        let recs = try await store.fetchEmailRecords(ids: ids)
+        try await store.enqueueDeletes(records: recs, now: 100)
+        let job = try await store.fetchDueDeleteJobs(now: 100, limit: 10)[0]
+        try await store.markDeleteJobsRunning(jobIds: [job.id!])
+
+        try await store.resetRunningDeleteJobs()
+
+        let st: String? = try await store.concurrentReader.read { db in
+            try String.fetchOne(db, sql: "SELECT state FROM delete_jobs WHERE id=?", arguments: [job.id!])
+        }
+        XCTAssertEqual(st, "queued")
+    }
 }
