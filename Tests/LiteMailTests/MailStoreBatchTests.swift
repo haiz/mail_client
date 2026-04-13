@@ -251,6 +251,42 @@ final class MailStoreBatchTests: XCTestCase {
         XCTAssertEqual(jobState, "failed")
     }
 
+    // MARK: - Pending Delete Visibility
+
+    func testPendingDeleteHiddenFromListingsAndFolderCounts() async throws {
+        // Ensure INBOX exists in sync_state so listFolders returns it
+        try await store.updateSyncState(
+            SyncStateRecord(accountId: testAccountId, folder: "INBOX",
+                            uidValidity: 1, lastUid: 0, lastSync: 0)
+        )
+
+        let ids = try await insertTestEmails(count: 3, folder: "INBOX")
+        let recs = try await store.fetchEmailRecords(ids: ids)
+        try await store.enqueueDeletes(records: [recs[0]], now: 100)
+
+        // fetchHeaders for the folder should return 2
+        let headers = try await store.fetchHeaders(accountId: testAccountId, folder: "INBOX", offset: 0, limit: 50)
+        XCTAssertEqual(headers.count, 2)
+        XCTAssertFalse(headers.contains(where: { $0.id == ids[0] }))
+
+        // listFolders count should be 2
+        let folders = try await store.listFolders(accountId: testAccountId)
+        let inbox = folders.first(where: { $0.folder == "INBOX" })
+        XCTAssertEqual(inbox?.totalCount, 2)
+    }
+
+    func testDeleteFailedStillVisibleInListings() async throws {
+        let ids = try await insertTestEmails(count: 1)
+        let recs = try await store.fetchEmailRecords(ids: ids)
+        try await store.enqueueDeletes(records: recs, now: 100)
+        let job = try await store.fetchDueDeleteJobs(now: 100, limit: 10)[0]
+        try await store.failDeleteJobsPermanent(jobIds: [job.id!], error: "denied")
+
+        let headers = try await store.fetchHeaders(accountId: testAccountId, folder: "INBOX", offset: 0, limit: 50)
+        XCTAssertEqual(headers.count, 1)
+        XCTAssertEqual(headers[0].id, ids[0])
+    }
+
     func testResetRunningJobsOnStartup() async throws {
         let ids = try await insertTestEmails(count: 1)
         let recs = try await store.fetchEmailRecords(ids: ids)

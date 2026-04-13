@@ -386,7 +386,7 @@ actor MailStore {
     func fetchHeaders(accountId: String, folder: String, offset: Int, limit: Int) throws -> [EmailRecord] {
         try dbPool.read { db in
             try EmailRecord
-                .filter(Column("account_id") == accountId && Column("folder") == folder && Column("is_deleted") == false)
+                .filter(Column("account_id") == accountId && Column("folder") == folder && Column("is_deleted") == false && Column("delete_state") != "pending_delete")
                 .order(Column("date").desc)
                 .limit(limit, offset: offset)
                 .fetchAll(db)
@@ -412,6 +412,7 @@ actor MailStore {
             try EmailRecord
                 .filter(Column("thread_id") == threadId)
                 .filter(Column("is_deleted") == false)
+                .filter(Column("delete_state") != "pending_delete")
                 .order(Column("date").asc)
                 .fetchAll(db)
         }
@@ -432,6 +433,8 @@ actor MailStore {
             guard !rowids.isEmpty else { return [] }
 
             var query = EmailRecord.filter(rowids.contains(Column("id")))
+                .filter(Column("is_deleted") == false)
+                .filter(Column("delete_state") != "pending_delete")
             if let accountId {
                 query = query.filter(Column("account_id") == accountId)
             }
@@ -723,8 +726,8 @@ actor MailStore {
             // Join sync_state (all known folders) with emails (may be empty for Drafts/Spam etc.)
             let rows = try Row.fetchAll(db, sql: """
                 SELECT ss.folder,
-                       COALESCE(SUM(CASE WHEN e.is_deleted = 0 THEN 1 ELSE 0 END), 0) AS total_count,
-                       COALESCE(SUM(CASE WHEN e.is_read = 0 AND e.is_deleted = 0 THEN 1 ELSE 0 END), 0) AS unread_count
+                       COALESCE(SUM(CASE WHEN e.is_deleted = 0 AND e.delete_state <> 'pending_delete' THEN 1 ELSE 0 END), 0) AS total_count,
+                       COALESCE(SUM(CASE WHEN e.is_read = 0 AND e.is_deleted = 0 AND e.delete_state <> 'pending_delete' THEN 1 ELSE 0 END), 0) AS unread_count
                 FROM sync_state ss
                 LEFT JOIN emails e ON e.folder = ss.folder AND e.account_id = ss.account_id
                 WHERE ss.account_id = ?
@@ -786,7 +789,7 @@ actor MailStore {
             try EmailRecord.fetchAll(db, sql: """
                 SELECT e.* FROM emails e
                 LEFT JOIN email_bodies b ON e.id = b.email_id
-                WHERE b.email_id IS NULL AND e.is_deleted = 0 AND e.account_id = ?
+                WHERE b.email_id IS NULL AND e.is_deleted = 0 AND e.delete_state <> 'pending_delete' AND e.account_id = ?
                 ORDER BY e.date DESC
                 LIMIT ?
             """, arguments: [accountId, limit])
