@@ -777,6 +777,7 @@ struct EmailRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var inReplyTo: String?
     var createdAt: Int?
     var accountId: String?
+    var deleteState: String = "synced"
 
     enum CodingKeys: String, CodingKey {
         case id, folder, subject, date, uid, flags, recipients
@@ -792,6 +793,7 @@ struct EmailRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         case inReplyTo = "in_reply_to"
         case createdAt = "created_at"
         case accountId = "account_id"
+        case deleteState = "delete_state"
     }
 }
 

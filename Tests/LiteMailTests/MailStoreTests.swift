@@ -318,6 +318,31 @@ final class MailStoreTests: XCTestCase {
         XCTAssertEqual(defaultState, "'synced'")
     }
 
+    // MARK: - DeleteState Tests
+
+    func testEmailRecordRoundTripsDeleteState() async throws {
+        let path = NSTemporaryDirectory() + "litemail_estate_\(UUID().uuidString).sqlite"
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let store = try MailStore(path: path)
+        let acc = AccountRecord(id: "a1", emailAddress: "x@y.z", protocolType: "imap",
+                                authType: "password", keychainRef: "k", isDefault: true)
+        try await store.insertAccount(acc)
+
+        var rec = EmailRecord(
+            messageId: "m1@x", folder: "INBOX", senderEmail: "s@x", date: 1,
+            isRead: false, isStarred: false, isDeleted: false, hasAttachments: false,
+            uid: 10, accountId: "a1"
+        )
+        rec.deleteState = "pending_delete"
+        let id = try await store.insertEmail(rec)
+        XCTAssertGreaterThan(id, 0)
+
+        let fetched: EmailRecord? = try await store.concurrentReader.read { db in
+            try EmailRecord.fetchOne(db, key: id)
+        }
+        XCTAssertEqual(fetched?.deleteState, "pending_delete")
+    }
+
     // MARK: - Helpers
 
     private func makeEmail(
