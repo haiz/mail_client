@@ -279,7 +279,8 @@ final class UIReviewRunner: NSObject {
             isRead: r.isRead,
             isStarred: r.isStarred,
             hasAttachments: r.hasAttachments,
-            snippet: nil
+            snippet: nil,
+            deleteState: r.deleteState
         )
     }
 }

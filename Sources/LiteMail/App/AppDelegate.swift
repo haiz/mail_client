@@ -158,6 +158,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.updateStatusBar()
                     self.startPeriodicSyncLoop()
                     self.windowController?.sidebarView.onAuthErrorFix = { [weak self] (_: String) in self?.openSettings() }
+                    // Surface permanent delete failures in the status bar.
+                    NotificationCenter.default.addObserver(forName: .deleteJobsPermanentlyFailed,
+                                                           object: nil, queue: .main) { [weak self] note in
+                        let count = note.userInfo?["count"] as? Int ?? 0
+                        guard count > 0 else { return }
+                        self?.windowController?.statusBar.updateSyncStatus(
+                            "Couldn't delete \(count) message\(count == 1 ? "" : "s") — retry from folder view")
+                    }
                     // Kick off an immediate sync so the user sees emails on launch
                     if !accounts.isEmpty {
                         Task { await self.performSyncCycle() }

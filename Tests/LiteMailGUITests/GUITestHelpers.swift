@@ -49,7 +49,8 @@ enum GUITestData {
                 isRead: i % 2 == 0,
                 isStarred: i == 1,
                 hasAttachments: i == 3,
-                snippet: "Preview of email \(i)..."
+                snippet: "Preview of email \(i)...",
+                deleteState: "synced"
             )
         }
     }

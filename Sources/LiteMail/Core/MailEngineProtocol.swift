@@ -90,6 +90,7 @@ struct EmailHeader: Sendable, Identifiable {
     let isStarred: Bool
     let hasAttachments: Bool
     let snippet: String?
+    let deleteState: String
 }
 
 struct EmailBody: Sendable {

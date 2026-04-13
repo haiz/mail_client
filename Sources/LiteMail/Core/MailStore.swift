@@ -690,6 +690,20 @@ actor MailStore {
         }
     }
 
+    /// Resets failed jobs in a folder back to queued and clears email delete_state.
+    func requeueFailedDeleteJobs(accountId: String, folder: String, now: Int) throws {
+        try dbPool.write { db in
+            try db.execute(sql: """
+                UPDATE delete_jobs SET state='queued', attempts=0, next_attempt_at=?, last_error=NULL
+                WHERE account_id=? AND folder=? AND state='failed'
+            """, arguments: [now, accountId, folder])
+            try db.execute(sql: """
+                UPDATE emails SET delete_state='pending_delete'
+                WHERE account_id=? AND folder=? AND delete_state='delete_failed'
+            """, arguments: [accountId, folder])
+        }
+    }
+
     // MARK: - Delete Reconciliation
 
     /// Returns (emailId, uid) for every pending_delete row in the given folder.

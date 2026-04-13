@@ -307,6 +307,14 @@ actor AccountManager: MailEngineProtocol {
         }
     }
 
+    func retryFailedDeletes(accountId: String, folder: String) async throws {
+        try await store.requeueFailedDeleteJobs(
+            accountId: accountId, folder: folder,
+            now: Int(Date().timeIntervalSince1970)
+        )
+        await deleteWorker.kick()
+    }
+
     func moveBatch(emailIds: [Int64], toFolder: String) async throws {
         guard !emailIds.isEmpty else { return }
         // Capture records before the move so we have the original folder for IMAP refs
@@ -484,7 +492,8 @@ actor AccountManager: MailEngineProtocol {
             isRead: r.isRead,
             isStarred: r.isStarred,
             hasAttachments: r.hasAttachments,
-            snippet: nil
+            snippet: nil,
+            deleteState: r.deleteState
         )
     }
 
