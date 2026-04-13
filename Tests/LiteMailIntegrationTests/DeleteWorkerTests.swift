@@ -80,6 +80,55 @@ final class DeleteWorkerTests: XCTestCase {
         XCTAssertEqual(row3.2, 1, "0-attempt job incremented to 1")
     }
 
+    func testWorkerRetriesTransientErrorWithBackoff() async throws {
+        struct NetErr: Error {}
+        let provider = MockDeleteProvider(accountId: accId)
+        await provider.setNextError(NetErr())
+        let worker = DeleteWorker(store: store, providerLookup: { _ in provider })
+
+        let id = try await insert(uid: 2)
+        let recs = try await store.fetchEmailRecords(ids: [id])
+        try await store.enqueueDeletes(records: recs, now: 0)
+        await worker.runOnce(now: 100)
+
+        let job: DeleteJobRecord? = try await store.concurrentReader.read { db in
+            try DeleteJobRecord.filter(Column("email_id") == id).fetchOne(db)
+        }
+        XCTAssertEqual(job?.state, "queued")
+        XCTAssertEqual(job?.attempts, 1)
+        XCTAssertGreaterThan(job?.nextAttemptAt ?? 0, 100)
+
+        let email: EmailRecord? = try await store.concurrentReader.read { db in
+            try EmailRecord.fetchOne(db, key: id)
+        }
+        XCTAssertEqual(email?.deleteState, "pending_delete", "still hidden, not yet failed")
+    }
+
+    func testWorkerMarksPermanentOnAuthFailure() async throws {
+        let provider = MockDeleteProvider(accountId: accId)
+        await provider.setNextError(IMAPProviderError.authFailed("denied"))
+        let worker = DeleteWorker(store: store, providerLookup: { _ in provider })
+
+        let id = try await insert(uid: 3)
+        let recs = try await store.fetchEmailRecords(ids: [id])
+        try await store.enqueueDeletes(records: recs, now: 0)
+
+        let expectation = XCTestExpectation(description: "permanent fail posted")
+        let obs = NotificationCenter.default.addObserver(forName: .deleteJobsPermanentlyFailed,
+                                                         object: nil, queue: nil) { _ in
+            expectation.fulfill()
+        }
+        defer { NotificationCenter.default.removeObserver(obs) }
+
+        await worker.runOnce(now: 100)
+        await fulfillment(of: [expectation], timeout: 1.0)
+
+        let email: EmailRecord? = try await store.concurrentReader.read { db in
+            try EmailRecord.fetchOne(db, key: id)
+        }
+        XCTAssertEqual(email?.deleteState, "delete_failed")
+    }
+
     func testWorkerDrainsSuccessfulJobs() async throws {
         let provider = MockDeleteProvider(accountId: accId)
         let worker = DeleteWorker(store: store, providerLookup: { _ in provider })
