@@ -1,4 +1,5 @@
 import XCTest
+import GRDB
 @testable import LiteMail
 
 final class DeleteWorkerTests: XCTestCase {
@@ -27,6 +28,56 @@ final class DeleteWorkerTests: XCTestCase {
             hasAttachments: false, uid: uid, accountId: accId
         )
         return try await store.insertEmail(rec)
+    }
+
+    /// Bumps a single job's attempt count by calling failDeleteJobsTransient repeatedly.
+    private func bumpAttempts(jobId: Int64, times: Int) async throws {
+        for _ in 0..<times {
+            try await store.failDeleteJobsTransient(jobIds: [jobId], now: 0, error: "bump")
+        }
+    }
+
+    func testWorkerPartialGiveupSplitsGroup() async throws {
+        let provider = MockDeleteProvider(accountId: accId)
+        await provider.setNextError(TransientTestError())
+        let worker = DeleteWorker(store: store, providerLookup: { _ in provider })
+
+        // Insert 3 emails and enqueue deletes.
+        let id1 = try await insert(uid: 1)
+        let id2 = try await insert(uid: 2)
+        let id3 = try await insert(uid: 3)
+        let recs = try await store.fetchEmailRecords(ids: [id1, id2, id3])
+        try await store.enqueueDeletes(records: recs, now: 0)
+
+        // Find the job ids (ordered by creation).
+        let allJobs: [DeleteJobRecord] = try await store.fetchDueDeleteJobs(now: 0, limit: 100)
+        let job1 = allJobs.first(where: { $0.emailId == id1 })!
+        let job2 = allJobs.first(where: { $0.emailId == id2 })!
+        // job3 stays at 0 attempts.
+
+        // Bump: job1 → 9 attempts, job2 → 5 attempts.
+        try await bumpAttempts(jobId: job1.id!, times: 9)
+        try await bumpAttempts(jobId: job2.id!, times: 5)
+
+        // Run the worker at a time when all jobs are due.
+        await worker.runOnce(now: 10_000)
+
+        // Assert: job1 (9→10 attempts) should be permanently failed.
+        // job2 and job3 should be queued with incremented attempts.
+        let rows: [(Int64, String, Int)] = try await store.concurrentReader.read { db in
+            try Row.fetchAll(db, sql: "SELECT id, state, attempts FROM delete_jobs ORDER BY id")
+                .map { ($0["id"], $0["state"], $0["attempts"]) }
+        }
+        let row1 = rows.first(where: { $0.0 == job1.id! })!
+        let row2 = rows.first(where: { $0.0 == job2.id! })!
+        let row3 = rows.first(where: { $0.0 == allJobs.first(where: { $0.emailId == id3 })!.id! })!
+
+        XCTAssertEqual(row1.1, "failed", "9-attempt job should be permanently failed")
+        XCTAssertEqual(row1.2, 9, "permanently failed job keeps its attempt count")
+        XCTAssertEqual(row2.1, "queued", "5-attempt job should be retried")
+        XCTAssertEqual(row2.2, 6, "5-attempt job incremented to 6")
+        XCTAssertEqual(row3.1, "queued", "0-attempt job should be retried")
+        XCTAssertEqual(row3.2, 1, "0-attempt job incremented to 1")
     }
 
     func testWorkerDrainsSuccessfulJobs() async throws {
@@ -63,6 +114,10 @@ actor MockDeleteProvider: MailProvider {
         self.accountId = accountId
     }
 
+    func setNextError(_ error: Error?) {
+        nextError = error
+    }
+
     func connect() async throws { isConnected = true }
     func disconnect() async throws { isConnected = false }
     func performInitialSync() async throws {}
@@ -89,4 +144,9 @@ actor MockDeleteProvider: MailProvider {
     func fetchAttachment(messageRef: String, partId: String) async throws -> Data { Data() }
     func startPushNotifications(onNewMessage: @escaping @Sendable () async -> Void) async throws {}
     func stopPushNotifications() async throws {}
+}
+
+/// A plain transient error (not classified as permanent by DeleteWorker.isPermanent).
+private struct TransientTestError: Error, CustomStringConvertible {
+    var description: String { "transient test error" }
 }

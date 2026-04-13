@@ -45,6 +45,7 @@ actor DeleteWorker {
         do {
             due = try await store.fetchDueDeleteJobs(now: now, limit: batchLimit)
         } catch {
+            print("DeleteWorker: fetchDueDeleteJobs failed: \(error)")
             return
         }
         guard !due.isEmpty else { return }
@@ -64,25 +65,61 @@ actor DeleteWorker {
     private func processGroup(accountId: String, folder: String, jobs: [DeleteJobRecord], now: Int) async {
         guard let provider = providerLookup(accountId) else {
             // No provider — transient: maybe account not loaded yet.
-            try? await store.failDeleteJobsTransient(
-                jobIds: jobs.compactMap(\.id), now: now, error: "provider not available")
+            do {
+                try await store.failDeleteJobsTransient(
+                    jobIds: jobs.compactMap(\.id), now: now, error: "provider not available")
+            } catch {
+                print("DeleteWorker: failDeleteJobsTransient (no provider) failed: \(error)")
+            }
             return
         }
         let ids = jobs.compactMap(\.id)
-        try? await store.markDeleteJobsRunning(jobIds: ids)
+        do {
+            try await store.markDeleteJobsRunning(jobIds: ids)
+        } catch {
+            print("DeleteWorker: markDeleteJobsRunning failed: \(error)")
+        }
 
         let refs = jobs.map { "folder:\($0.folder):uid:\($0.uid)" }
         do {
             try await provider.deleteMessageBatch(messageRefs: refs)
-            try? await store.succeedDeleteJobs(jobIds: ids)
+            do {
+                try await store.succeedDeleteJobs(jobIds: ids)
+            } catch {
+                print("DeleteWorker: succeedDeleteJobs failed after server-side delete: \(error)")
+            }
         } catch {
-            if DeleteWorker.isPermanent(error) || jobs.first.map({ $0.attempts + 1 >= 10 }) == true {
-                try? await store.failDeleteJobsPermanent(jobIds: ids, error: "\(error)")
+            if DeleteWorker.isPermanent(error) {
+                // Permanent provider error — all jobs in group fail permanently.
+                do {
+                    try await store.failDeleteJobsPermanent(jobIds: ids, error: "\(error)")
+                } catch {
+                    print("DeleteWorker: failDeleteJobsPermanent failed: \(error)")
+                }
                 NotificationCenter.default.post(name: .deleteJobsPermanentlyFailed,
                                                 object: nil,
                                                 userInfo: ["count": ids.count])
             } else {
-                try? await store.failDeleteJobsTransient(jobIds: ids, now: now, error: "\(error)")
+                // Transient error — split by per-job attempt count.
+                let giveupIds = jobs.filter { $0.attempts + 1 >= 10 }.compactMap(\.id)
+                let retryIds  = jobs.filter { $0.attempts + 1 < 10 }.compactMap(\.id)
+                if !giveupIds.isEmpty {
+                    do {
+                        try await store.failDeleteJobsPermanent(jobIds: giveupIds, error: "\(error)")
+                    } catch {
+                        print("DeleteWorker: failDeleteJobsPermanent (giveup) failed: \(error)")
+                    }
+                    NotificationCenter.default.post(name: .deleteJobsPermanentlyFailed,
+                                                    object: nil,
+                                                    userInfo: ["count": giveupIds.count])
+                }
+                if !retryIds.isEmpty {
+                    do {
+                        try await store.failDeleteJobsTransient(jobIds: retryIds, now: now, error: "\(error)")
+                    } catch {
+                        print("DeleteWorker: failDeleteJobsTransient failed: \(error)")
+                    }
+                }
             }
         }
     }
