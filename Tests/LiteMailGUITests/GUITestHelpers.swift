@@ -27,10 +27,10 @@ enum GUITestData {
 
     static var sampleFolders: [MailFolder] {
         [
-            MailFolder(id: "INBOX", name: "Inbox", unreadCount: 3, role: .inbox),
-            MailFolder(id: "[Gmail]/Sent Mail", name: "Sent", unreadCount: 0, role: .sent),
-            MailFolder(id: "[Gmail]/Drafts", name: "Drafts", unreadCount: 1, role: .drafts),
-            MailFolder(id: "[Gmail]/Trash", name: "Trash", unreadCount: 0, role: .trash),
+            MailFolder(id: "INBOX", name: "Inbox", totalCount: 10, hasUnread: true, role: .inbox),
+            MailFolder(id: "[Gmail]/Sent Mail", name: "Sent", totalCount: 5, hasUnread: false, role: .sent),
+            MailFolder(id: "[Gmail]/Drafts", name: "Drafts", totalCount: 2, hasUnread: true, role: .drafts),
+            MailFolder(id: "[Gmail]/Trash", name: "Trash", totalCount: 0, hasUnread: false, role: .trash),
         ]
     }
 

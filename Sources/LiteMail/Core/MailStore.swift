@@ -575,11 +575,12 @@ actor MailStore {
 
     // MARK: - Folders
 
-    func listFolders(accountId: String) throws -> [(folder: String, unreadCount: Int)] {
+    func listFolders(accountId: String) throws -> [(folder: String, totalCount: Int, hasUnread: Bool)] {
         try dbPool.read { db in
             // Join sync_state (all known folders) with emails (may be empty for Drafts/Spam etc.)
             let rows = try Row.fetchAll(db, sql: """
                 SELECT ss.folder,
+                       COALESCE(SUM(CASE WHEN e.is_deleted = 0 THEN 1 ELSE 0 END), 0) AS total_count,
                        COALESCE(SUM(CASE WHEN e.is_read = 0 AND e.is_deleted = 0 THEN 1 ELSE 0 END), 0) AS unread_count
                 FROM sync_state ss
                 LEFT JOIN emails e ON e.folder = ss.folder AND e.account_id = ss.account_id
@@ -587,7 +588,7 @@ actor MailStore {
                 GROUP BY ss.folder
                 ORDER BY ss.folder
             """, arguments: [accountId])
-            return rows.map { (folder: $0["folder"], unreadCount: $0["unread_count"]) }
+            return rows.map { (folder: $0["folder"], totalCount: $0["total_count"], hasUnread: ($0["unread_count"] as Int) > 0) }
         }
     }
 

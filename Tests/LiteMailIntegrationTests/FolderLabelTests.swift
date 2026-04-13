@@ -25,7 +25,8 @@ final class FolderLabelTests: XCTestCase {
 
         let inbox = folders.first(where: { $0.id == "INBOX" })
         XCTAssertNotNil(inbox, "Should find INBOX folder. Got folders: \(folders.map { "\($0.id):\($0.name)" })")
-        XCTAssertEqual(inbox?.unreadCount, 1, "INBOX should have 1 unread email")
+        XCTAssertEqual(inbox?.totalCount, 2, "INBOX should have 2 total emails")
+        XCTAssertTrue(inbox?.hasUnread == true, "INBOX should have unread emails")
     }
 
     func testAllLabelsForAccount() async throws {

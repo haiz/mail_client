@@ -7,6 +7,38 @@ struct ThreadGroup {
     let threadId: String?
 }
 
+/// NSTableView subclass that allows embedded controls (checkboxes, buttons) to
+/// receive clicks directly instead of the table eating the mouseDown for row selection.
+///
+/// Two mechanisms work together:
+/// 1. `validateProposedFirstResponder` tells AppKit to let NSButtons handle events.
+/// 2. `mouseDown` directly detects checkbox clicks by coordinate, bypassing hitTest.
+///    This is necessary because after reloadData, recycled cells may have stale layout
+///    (checkbox frame still zero-width) until the next display pass.
+private final class MessageTableView: NSTableView {
+    override func validateProposedFirstResponder(_ responder: NSResponder, for event: NSEvent?) -> Bool {
+        if responder is NSButton { return true }
+        return super.validateProposedFirstResponder(responder, for: event)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let pointInTable = convert(event.locationInWindow, from: nil)
+        let clickedRow = row(at: pointInTable)
+        if clickedRow >= 0,
+           let cell = view(atColumn: 0, row: clickedRow, makeIfNecessary: false) {
+            let pointInCell = cell.convert(event.locationInWindow, from: nil)
+            for subview in cell.subviews {
+                guard let button = subview as? NSButton, !button.isHidden else { continue }
+                if button.frame.insetBy(dx: -4, dy: -6).contains(pointInCell) {
+                    button.sendAction(button.action, to: button.target)
+                    return
+                }
+            }
+        }
+        super.mouseDown(with: event)
+    }
+}
+
 /// Message list with NSTableView, lazy row loading from GRDB, thread grouping.
 /// View-based table with cell recycling for minimal memory usage.
 final class MessageListView: NSObject {
@@ -53,8 +85,8 @@ final class MessageListView: NSObject {
         searchField.placeholderString = "Search emails... \u{2318}K"
         searchField.translatesAutoresizingMaskIntoConstraints = false
 
-        // Table view
-        tableView = NSTableView()
+        // Table view — custom subclass so checkboxes receive clicks directly
+        tableView = MessageTableView()
         tableView.headerView = nil
         tableView.rowHeight = 64
         tableView.selectionHighlightStyle = .regular
@@ -368,8 +400,11 @@ private final class MessageCellView: NSTableCellView {
     /// Whether the mouse is currently hovering over this cell.
     private var isHovering = false
     private var trackingArea: NSTrackingArea?
-    /// Width constraint for checkbox — 0 when hidden, nil (intrinsic) when visible.
-    private var checkboxWidthConstraint: NSLayoutConstraint?
+
+    /// Fixed leading offset for the content area (sender, subject). Keeps content
+    /// stable regardless of checkbox visibility — the checkbox zone always occupies
+    /// this space, the checkbox itself is just shown/hidden inside it.
+    private static let contentLeading: CGFloat = 44
 
     private static let dateFormatter: DateFormatter = {
         let f = DateFormatter()
@@ -395,7 +430,9 @@ private final class MessageCellView: NSTableCellView {
             addSubview(v)
         }
 
-        // Checkbox — hidden until multi-select is active
+        // Checkbox — hidden until hover or multi-select is active.
+        // No width constraint toggling: the content zone is always fixed-width
+        // so toggling the checkbox never shifts senderLabel.
         checkbox.isHidden = true
         checkbox.target = self
         checkbox.action = #selector(checkboxClicked)
@@ -413,6 +450,7 @@ private final class MessageCellView: NSTableCellView {
         threadBadge.isHidden = true
 
         subjectLabel.font = .systemFont(ofSize: 12)
+
         subjectLabel.textColor = .secondaryLabelColor
         subjectLabel.lineBreakMode = .byTruncatingTail
 
@@ -428,23 +466,21 @@ private final class MessageCellView: NSTableCellView {
         unreadDot.layer?.backgroundColor = NSColor.controlAccentColor.cgColor
         unreadDot.layer?.cornerRadius = 4
 
-        // Checkbox width constraint — 0 when hidden, intrinsic when visible
-        checkboxWidthConstraint = checkbox.widthAnchor.constraint(equalToConstant: 0)
-        checkboxWidthConstraint?.isActive = true
-
         NSLayoutConstraint.activate([
-            // Checkbox at the left edge
-            checkbox.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
-            checkbox.centerYAnchor.constraint(equalTo: centerYAnchor),
-
-            // Unread dot anchored off the checkbox trailing edge
-            unreadDot.leadingAnchor.constraint(equalTo: checkbox.trailingAnchor, constant: 2),
+            // Unread dot: fixed left margin, independent of layout chain
+            unreadDot.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
             unreadDot.centerYAnchor.constraint(equalTo: senderLabel.centerYAnchor),
             unreadDot.widthAnchor.constraint(equalToConstant: 8),
             unreadDot.heightAnchor.constraint(equalToConstant: 8),
 
+            // Checkbox sits in the leading zone; content is always at contentLeading
+            // so showing/hiding the checkbox never shifts senderLabel or subjectLabel.
+            checkbox.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+            checkbox.centerYAnchor.constraint(equalTo: centerYAnchor),
+
+            // Sender at fixed offset — independent of checkbox visibility
             senderLabel.topAnchor.constraint(equalTo: topAnchor, constant: 8),
-            senderLabel.leadingAnchor.constraint(equalTo: unreadDot.trailingAnchor, constant: 6),
+            senderLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: MessageCellView.contentLeading),
 
             threadBadge.centerYAnchor.constraint(equalTo: senderLabel.centerYAnchor),
             threadBadge.leadingAnchor.constraint(equalTo: senderLabel.trailingAnchor, constant: 4),
@@ -457,7 +493,7 @@ private final class MessageCellView: NSTableCellView {
             dateLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
 
             subjectLabel.topAnchor.constraint(equalTo: senderLabel.bottomAnchor, constant: 2),
-            subjectLabel.leadingAnchor.constraint(equalTo: senderLabel.leadingAnchor),
+            subjectLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: MessageCellView.contentLeading),
             subjectLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
 
             starIcon.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
@@ -465,6 +501,10 @@ private final class MessageCellView: NSTableCellView {
             starIcon.widthAnchor.constraint(equalToConstant: 12),
             starIcon.heightAnchor.constraint(equalToConstant: 12),
         ])
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
     }
 
     override func updateTrackingAreas() {
@@ -495,8 +535,6 @@ private final class MessageCellView: NSTableCellView {
     private func updateCheckboxVisibility() {
         let shouldShow = alwaysShowCheckbox || isHovering
         checkbox.isHidden = !shouldShow
-        // Collapse width to 0 when hidden so it doesn't push content right
-        checkboxWidthConstraint?.isActive = !shouldShow
     }
 
     @objc private func checkboxClicked() {

@@ -304,6 +304,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return Array(expanded)
     }
 
+    /// Blocking confirmation for bulk-destructive actions. Returns true if user confirms.
+    @MainActor
+    private func confirmBulkDelete(count: Int) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "Delete \(count) messages?"
+        alert.informativeText = "This will move \(count) messages to Trash on the server. You can undo briefly from the toast, but the action propagates quickly."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
     private func handleAction(_ action: MailAction) {
         guard let accountManager else { return }
 
@@ -348,9 +360,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     performSearch(query: query)
                 case .batchDelete(let ids) where !ids.isEmpty:
                     let expandedIds = try await expandThreadIds(ids)
+                    // Guardrail: undo toast alone isn't enough protection for large deletes.
+                    // Require explicit confirmation once the batch gets destructive.
+                    if expandedIds.count >= 50, !confirmBulkDelete(count: expandedIds.count) {
+                        break
+                    }
                     try await accountManager.deleteBatch(emailIds: expandedIds)
                     // Reload list (fetches next page), sidebar counts, status bar
                     refreshAfterBatchAction()
+                    windowController?.messageListView.clearCheckedIds()
                     let deleteDesc = expandedIds.count != ids.count
                         ? "Deleted \(ids.count) conversation\(ids.count == 1 ? "" : "s") (\(expandedIds.count) messages)"
                         : "Deleted \(ids.count) conversation\(ids.count == 1 ? "" : "s")"
@@ -369,6 +387,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     let originalRecords = try await accountManager.store.fetchEmailRecords(ids: expandedIds)
                     try await accountManager.archiveBatch(emailIds: expandedIds)
                     refreshAfterBatchAction()
+                    windowController?.messageListView.clearCheckedIds()
                     let archiveDesc = expandedIds.count != ids.count
                         ? "Archived \(ids.count) conversation\(ids.count == 1 ? "" : "s") (\(expandedIds.count) messages)"
                         : "Archived \(ids.count) conversation\(ids.count == 1 ? "" : "s")"
@@ -432,6 +451,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     let preRecords = try await accountManager.store.fetchEmailRecords(ids: expandedIds)
                     try await accountManager.moveBatch(emailIds: expandedIds, toFolder: folder)
                     refreshAfterBatchAction()
+                    windowController?.messageListView.clearCheckedIds()
                     let moveDesc = expandedIds.count != ids.count
                         ? "Moved \(ids.count) conversation\(ids.count == 1 ? "" : "s") (\(expandedIds.count) messages)"
                         : "Moved \(ids.count) conversation\(ids.count == 1 ? "" : "s")"
@@ -806,11 +826,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private static func defaultFolders() -> [MailFolder] {
         [
-            MailFolder(id: "INBOX", name: "Inbox", unreadCount: 0, role: .inbox),
-            MailFolder(id: "[Gmail]/Starred", name: "Starred", unreadCount: 0, role: .starred),
-            MailFolder(id: "[Gmail]/Sent Mail", name: "Sent", unreadCount: 0, role: .sent),
-            MailFolder(id: "[Gmail]/Drafts", name: "Drafts", unreadCount: 0, role: .drafts),
-            MailFolder(id: "[Gmail]/Trash", name: "Trash", unreadCount: 0, role: .trash),
+            MailFolder(id: "INBOX", name: "Inbox", totalCount: 0, hasUnread: false, role: .inbox),
+            MailFolder(id: "[Gmail]/Starred", name: "Starred", totalCount: 0, hasUnread: false, role: .starred),
+            MailFolder(id: "[Gmail]/Sent Mail", name: "Sent", totalCount: 0, hasUnread: false, role: .sent),
+            MailFolder(id: "[Gmail]/Drafts", name: "Drafts", totalCount: 0, hasUnread: false, role: .drafts),
+            MailFolder(id: "[Gmail]/Trash", name: "Trash", totalCount: 0, hasUnread: false, role: .trash),
         ]
     }
 

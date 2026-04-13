@@ -13,15 +13,21 @@ final class SidebarView: NSObject {
 
     /// Called when a folder is selected. (accountId, folderId)
     var onFolderSelected: ((String, String) -> Void)?
+    /// Called when an email is dragged and dropped onto a folder. (emailId, folderId)
+    var onMoveToFolder: ((Int64, String) -> Void)?
     /// Called when user switches account via the dropdown.
     var onAccountSwitched: ((String) -> Void)?
     /// Called when Compose button is clicked.
     var onCompose: (() -> Void)?
     /// Called when Refresh button is clicked.
     var onRefresh: (() -> Void)?
+    /// Called when the user taps "fix sign-in" for an account with an auth error. Receives accountId.
+    var onAuthErrorFix: ((String) -> Void)?
 
     private var accounts: [(id: String, email: String)] = []
     private var currentAccountId: String?
+    private var authErrorAccountIds: Set<String> = []
+    /// Top-level items: system folder leaves + section headers with children
     private var mailboxes: [SidebarItem] = []
 
     override init() {
@@ -115,6 +121,7 @@ final class SidebarView: NSObject {
 
         outlineView.dataSource = self
         outlineView.delegate = self
+        outlineView.registerForDraggedTypes([.string])
         composeButton.target = self
         composeButton.action = #selector(composeClicked)
         refreshButton.target = self
@@ -137,24 +144,85 @@ final class SidebarView: NSObject {
         let displayAccount = accountList.first(where: { $0.id == currentAccountId }) ?? accountList.first
         if let account = displayAccount {
             accountSwitcher.configure(email: account.email)
+            accountSwitcher.setAuthError(authErrorAccountIds.contains(account.id))
         }
     }
 
-    /// Updates the folder list for the current account.
+    /// Updates the folder list for the current account, grouped into sections.
     func updateFolders(_ folders: [MailFolder]) {
-        mailboxes = folders.map { folder in
-            SidebarItem(
-                title: folder.name,
-                icon: Self.iconForFolder(folder.id),
-                folderId: folder.id,
-                unreadCount: folder.unreadCount,
-                accountId: currentAccountId
-            )
-        }
-        outlineView.reloadData()
+        // Buckets
+        var systemItems: [SidebarItem] = []
+        var categoryItems: [SidebarItem] = []
+        var labelItems: [SidebarItem] = []
 
-        if let inboxRow = findRow(folderId: "INBOX") {
+        for folder in folders {
+            let item = SidebarItem(
+                title: folder.name,
+                icon: Self.iconForFolder(folder.id, role: folder.role),
+                folderId: folder.id,
+                totalCount: folder.totalCount > 0 ? folder.totalCount : nil,
+                hasUnread: folder.hasUnread,
+                accountId: currentAccountId,
+                role: folder.role
+            )
+            switch folder.role {
+            case .inbox, .sent, .drafts, .trash, .spam, .starred, .archive, .all:
+                systemItems.append(item)
+            case .category:
+                categoryItems.append(item)
+            case nil:
+                labelItems.append(item)
+            }
+        }
+
+        // Sort system items by canonical Gmail order
+        let systemOrder: [FolderRole] = [.inbox, .starred, .sent, .drafts, .spam, .trash, .archive, .all]
+        systemItems.sort {
+            let i = systemOrder.firstIndex(of: $0.role ?? .all) ?? 99
+            let j = systemOrder.firstIndex(of: $1.role ?? .all) ?? 99
+            return i < j
+        }
+
+        categoryItems.sort { $0.title < $1.title }
+        labelItems.sort { $0.title < $1.title }
+
+        var items = systemItems
+        if !categoryItems.isEmpty {
+            items.append(SidebarItem(title: "Categories", children: categoryItems))
+        }
+        if !labelItems.isEmpty {
+            items.append(SidebarItem(title: "Labels", children: labelItems))
+        }
+
+        // Preserve the user's current folder selection across reload.
+        let previousFolderId: String? = {
+            let row = outlineView.selectedRow
+            guard row >= 0, let item = outlineView.item(atRow: row) as? SidebarItem else { return nil }
+            return item.folderId
+        }()
+
+        mailboxes = items
+        outlineView.reloadData()
+        outlineView.expandItem(nil, expandChildren: true)
+
+        let targetFolder = previousFolderId ?? "INBOX"
+        if let targetRow = findRow(folderId: targetFolder) {
+            outlineView.selectRowIndexes(IndexSet(integer: targetRow), byExtendingSelection: false)
+        } else if let inboxRow = findRow(folderId: "INBOX") {
             outlineView.selectRowIndexes(IndexSet(integer: inboxRow), byExtendingSelection: false)
+        }
+    }
+
+    /// Marks or clears the auth-error badge for the given account.
+    /// If that account is currently displayed, the badge updates immediately.
+    func setAuthError(for accountId: String, hasError: Bool) {
+        if hasError {
+            authErrorAccountIds.insert(accountId)
+        } else {
+            authErrorAccountIds.remove(accountId)
+        }
+        if accountId == currentAccountId {
+            accountSwitcher.setAuthError(hasError)
         }
     }
 
@@ -163,6 +231,20 @@ final class SidebarView: NSObject {
     private func showAccountMenu() {
         guard !accounts.isEmpty else { return }
         let menu = NSMenu()
+
+        // If the current account has an auth error, show a fix item at the top.
+        if let currentId = currentAccountId, authErrorAccountIds.contains(currentId) {
+            let fixItem = NSMenuItem(
+                title: "⚠ Sign-in failed – tap to fix",
+                action: #selector(authErrorMenuItemSelected(_:)),
+                keyEquivalent: ""
+            )
+            fixItem.target = self
+            fixItem.representedObject = currentId
+            menu.addItem(fixItem)
+            menu.addItem(.separator())
+        }
+
         for account in accounts {
             let item = NSMenuItem(
                 title: account.email,
@@ -183,7 +265,13 @@ final class SidebarView: NSObject {
               let account = accounts.first(where: { $0.id == id }) else { return }
         currentAccountId = id
         accountSwitcher.configure(email: account.email)
+        accountSwitcher.setAuthError(authErrorAccountIds.contains(id))
         onAccountSwitched?(id)
+    }
+
+    @objc private func authErrorMenuItemSelected(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        onAuthErrorFix?(id)
     }
 
     @objc private func composeClicked() { onCompose?() }
@@ -192,14 +280,14 @@ final class SidebarView: NSObject {
     // MARK: - Defaults
 
     private func loadDefaultMailboxes() {
-        let defaults: [(String, String, String)] = [
-            ("Inbox", "tray.fill", "INBOX"),
-            ("Starred", "star.fill", "[Gmail]/Starred"),
-            ("Sent", "paperplane.fill", "[Gmail]/Sent Mail"),
-            ("Drafts", "doc.text.fill", "[Gmail]/Drafts"),
-            ("Trash", "trash.fill", "[Gmail]/Trash"),
+        let defaults: [(String, String, String, FolderRole)] = [
+            ("Inbox", "tray.fill", "INBOX", .inbox),
+            ("Starred", "star.fill", "[Gmail]/Starred", .starred),
+            ("Sent", "paperplane.fill", "[Gmail]/Sent Mail", .sent),
+            ("Drafts", "doc.text.fill", "[Gmail]/Drafts", .drafts),
+            ("Trash", "trash.fill", "[Gmail]/Trash", .trash),
         ]
-        mailboxes = defaults.map { SidebarItem(title: $0.0, icon: $0.1, folderId: $0.2) }
+        mailboxes = defaults.map { SidebarItem(title: $0.0, icon: $0.1, folderId: $0.2, role: $0.3) }
         outlineView.reloadData()
     }
 
@@ -212,15 +300,33 @@ final class SidebarView: NSObject {
         return nil
     }
 
-    private static func iconForFolder(_ folderId: String) -> String {
-        switch folderId {
-        case "INBOX": return "tray.fill"
-        case "[Gmail]/Starred": return "star.fill"
-        case "[Gmail]/Sent Mail": return "paperplane.fill"
-        case "[Gmail]/Drafts": return "doc.text.fill"
-        case "[Gmail]/Trash": return "trash.fill"
-        case "[Gmail]/All Mail": return "archivebox.fill"
-        default: return "tag.fill"
+    private static func iconForFolder(_ folderId: String, role: FolderRole? = nil) -> String {
+        switch role {
+        case .inbox:   return "tray.fill"
+        case .starred: return "star.fill"
+        case .sent:    return "paperplane.fill"
+        case .drafts:  return "doc.text.fill"
+        case .trash:   return "trash.fill"
+        case .spam:    return "xmark.bin.fill"
+        case .archive, .all: return "archivebox.fill"
+        case .category: return Self.iconForCategory(folderId)
+        case nil:
+            switch folderId {
+            case "INBOX": return "tray.fill"
+            default: return "tag.fill"
+            }
+        }
+    }
+
+    private static func iconForCategory(_ folderId: String) -> String {
+        let name = folderId.split(separator: "/").last.map(String.init)?.lowercased() ?? ""
+        switch name {
+        case "social":     return "person.2.fill"
+        case "promotions": return "tag.fill"
+        case "updates":    return "bell.fill"
+        case "forums":     return "bubble.left.and.bubble.right.fill"
+        case "purchases":  return "bag.fill"
+        default:           return "tray.2.fill"
         }
     }
 }
@@ -229,23 +335,78 @@ final class SidebarView: NSObject {
 
 extension SidebarView: NSOutlineViewDataSource {
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
-        item == nil ? mailboxes.count : 0
+        if item == nil { return mailboxes.count }
+        return (item as? SidebarItem)?.children?.count ?? 0
     }
 
     func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
-        mailboxes[index]
+        if item == nil { return mailboxes[index] }
+        return (item as! SidebarItem).children![index]
     }
 
     func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
-        false
+        (item as? SidebarItem)?.isSection ?? false
+    }
+
+    // MARK: - Drag & drop destination
+
+    func outlineView(_ outlineView: NSOutlineView, validateDrop info: any NSDraggingInfo, proposedItem item: Any?, proposedChildIndex index: Int) -> NSDragOperation {
+        guard let sidebarItem = item as? SidebarItem, !sidebarItem.isSection, sidebarItem.folderId != nil else {
+            return []
+        }
+        return .move
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, acceptDrop info: any NSDraggingInfo, item: Any?, childIndex index: Int) -> Bool {
+        guard let sidebarItem = item as? SidebarItem, !sidebarItem.isSection,
+              let folderId = sidebarItem.folderId,
+              let idStr = info.draggingPasteboard.string(forType: .string),
+              let emailId = Int64(idStr) else {
+            return false
+        }
+        onMoveToFolder?(emailId, folderId)
+        return true
     }
 }
 
 // MARK: - NSOutlineViewDelegate
 
 extension SidebarView: NSOutlineViewDelegate {
+
+    func outlineView(_ outlineView: NSOutlineView, isGroupItem item: Any) -> Bool {
+        (item as? SidebarItem)?.isSection ?? false
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, shouldSelectItem item: Any) -> Bool {
+        !((item as? SidebarItem)?.isSection ?? false)
+    }
+
     func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
         guard let sidebarItem = item as? SidebarItem else { return nil }
+
+        // Section headers use the standard group cell
+        if sidebarItem.isSection {
+            let cellId = NSUserInterfaceItemIdentifier("SidebarGroupCell")
+            let cell: NSTableCellView
+            if let recycled = outlineView.makeView(withIdentifier: cellId, owner: self) as? NSTableCellView {
+                cell = recycled
+            } else {
+                cell = NSTableCellView()
+                cell.identifier = cellId
+                let textField = NSTextField(labelWithString: "")
+                textField.translatesAutoresizingMaskIntoConstraints = false
+                textField.lineBreakMode = .byTruncatingTail
+                cell.addSubview(textField)
+                cell.textField = textField
+                NSLayoutConstraint.activate([
+                    textField.leadingAnchor.constraint(equalTo: cell.leadingAnchor),
+                    textField.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+                    textField.trailingAnchor.constraint(equalTo: cell.trailingAnchor),
+                ])
+            }
+            cell.textField?.stringValue = sidebarItem.title
+            return cell
+        }
 
         let cellId = NSUserInterfaceItemIdentifier("SidebarCell")
         let cell: NSTableCellView
@@ -292,7 +453,9 @@ extension SidebarView: NSOutlineViewDelegate {
         }
 
         cell.textField?.stringValue = sidebarItem.title
-        cell.textField?.font = .systemFont(ofSize: 13)
+        cell.textField?.font = sidebarItem.hasUnread
+            ? .systemFont(ofSize: 13, weight: .semibold)
+            : .systemFont(ofSize: 13)
         cell.textField?.textColor = .labelColor
 
         if let iconName = sidebarItem.icon {
@@ -304,7 +467,7 @@ extension SidebarView: NSOutlineViewDelegate {
         }
 
         let badgeField = cell.subviews.first { $0.identifier?.rawValue == "badge" } as? NSTextField
-        if let count = sidebarItem.unreadCount, count > 0 {
+        if let count = sidebarItem.totalCount, count > 0 {
             badgeField?.stringValue = "\(count)"
             badgeField?.isHidden = false
         } else {
@@ -317,7 +480,7 @@ extension SidebarView: NSOutlineViewDelegate {
     func outlineViewSelectionDidChange(_ notification: Notification) {
         let row = outlineView.selectedRow
         guard row >= 0, let item = outlineView.item(atRow: row) as? SidebarItem,
-              let folderId = item.folderId else { return }
+              !item.isSection, let folderId = item.folderId else { return }
         let accountId = item.accountId ?? currentAccountId ?? "default"
         onFolderSelected?(accountId, folderId)
     }
@@ -344,10 +507,13 @@ private final class AccountSwitcherView: NSView {
     private let nameLabel = NSTextField(labelWithString: "")
     private let emailLabel = NSTextField(labelWithString: "")
     private let chevron: NSImageView
+    private let warningBadge: NSImageView
 
     private var avatarColor: NSColor = .controlAccentColor
     private var isHovered = false
     private var isPressed = false
+    private var hasAuthError = false
+    var authError: Bool { hasAuthError }
 
     private static let avatarColors: [NSColor] = [
         NSColor(red: 0.35, green: 0.56, blue: 0.97, alpha: 1), // Blue
@@ -362,6 +528,9 @@ private final class AccountSwitcherView: NSView {
     override init(frame frameRect: NSRect) {
         chevron = NSImageView(
             image: NSImage(systemSymbolName: "chevron.up.chevron.down", accessibilityDescription: nil) ?? NSImage()
+        )
+        warningBadge = NSImageView(
+            image: NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: "Auth error") ?? NSImage()
         )
         super.init(frame: frameRect)
         setup()
@@ -433,7 +602,15 @@ private final class AccountSwitcherView: NSView {
         chevron.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 9, weight: .semibold)
         chevron.translatesAutoresizingMaskIntoConstraints = false
 
+        // Warning badge: orange triangle, overlaid on bottom-right corner of avatar
+        warningBadge.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 12, weight: .bold)
+        warningBadge.contentTintColor = .systemOrange
+        warningBadge.translatesAutoresizingMaskIntoConstraints = false
+        warningBadge.isHidden = true
+        warningBadge.toolTip = "Sign-in failed — click to fix"
+
         addSubview(avatarCircle)
+        addSubview(warningBadge)
         addSubview(textContainer)
         addSubview(chevron)
 
@@ -443,6 +620,12 @@ private final class AccountSwitcherView: NSView {
             avatarCircle.centerYAnchor.constraint(equalTo: centerYAnchor),
             avatarCircle.widthAnchor.constraint(equalToConstant: 36),
             avatarCircle.heightAnchor.constraint(equalToConstant: 36),
+
+            // Warning badge: 14×14, bottom-right of avatar circle
+            warningBadge.widthAnchor.constraint(equalToConstant: 14),
+            warningBadge.heightAnchor.constraint(equalToConstant: 14),
+            warningBadge.trailingAnchor.constraint(equalTo: avatarCircle.trailingAnchor, constant: 3),
+            warningBadge.bottomAnchor.constraint(equalTo: avatarCircle.bottomAnchor, constant: 3),
 
             // Chevron: 8px from right, vertically centered
             chevron.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
@@ -500,6 +683,12 @@ private final class AccountSwitcherView: NSView {
         needsDisplay = true
     }
 
+    /// Shows or hides the auth-error warning badge.
+    func setAuthError(_ error: Bool) {
+        hasAuthError = error
+        warningBadge.isHidden = !error
+    }
+
     // MARK: - Hover & Click
 
     override func updateTrackingAreas() {
@@ -513,19 +702,17 @@ private final class AccountSwitcherView: NSView {
         ))
     }
 
-    override func resetCursorRects() {
-        addCursorRect(bounds, cursor: .pointingHand)
-    }
-
     override func mouseEntered(with event: NSEvent) {
         isHovered = true
         needsDisplay = true
+        NSCursor.pointingHand.push()
     }
 
     override func mouseExited(with event: NSEvent) {
         isHovered = false
         isPressed = false
         needsDisplay = true
+        NSCursor.pop()
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -548,15 +735,36 @@ private class SidebarItem {
     let title: String
     let icon: String?
     let folderId: String?
-    var unreadCount: Int?
+    var totalCount: Int?
+    var hasUnread: Bool
     var accountId: String?
+    var role: FolderRole?
+    /// Non-nil for section headers (Categories, Labels). Leaf items have nil.
+    var children: [SidebarItem]?
 
-    init(title: String, icon: String? = nil, folderId: String? = nil, unreadCount: Int? = nil,
-         accountId: String? = nil) {
+    var isSection: Bool { children != nil }
+
+    /// Leaf folder item.
+    init(title: String, icon: String? = nil, folderId: String? = nil, totalCount: Int? = nil,
+         hasUnread: Bool = false, accountId: String? = nil, role: FolderRole? = nil) {
         self.title = title
         self.icon = icon
         self.folderId = folderId
-        self.unreadCount = unreadCount
+        self.totalCount = totalCount
+        self.hasUnread = hasUnread
         self.accountId = accountId
+        self.role = role
+    }
+
+    /// Section header item.
+    init(title: String, children: [SidebarItem]) {
+        self.title = title
+        self.icon = nil
+        self.folderId = nil
+        self.totalCount = nil
+        self.hasUnread = false
+        self.accountId = nil
+        self.role = nil
+        self.children = children
     }
 }

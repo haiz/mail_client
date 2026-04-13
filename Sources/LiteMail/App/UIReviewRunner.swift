@@ -64,15 +64,23 @@ final class UIReviewRunner: NSObject {
     private func captureStaticScreens() {
         guard let wc = windowController else { return }
 
+        // Populate sidebar with demo data so account switcher renders.
+        // Pump RunLoop after to let AppKit complete layout and layer display passes.
+        wc.sidebarView.setAccounts(
+            [(id: "default", email: "demo@litemail.local")],
+            activeId: "default"
+        )
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.3))
+
         captureView(wc.detailView.view, filename: "01_detail_empty.png", entry: .init(
             file: "01_detail_empty.png", type: "screen", name: "Detail empty state"
         ))
 
-        if let contentView = wc.window.contentView {
-            captureView(contentView, filename: "02_full_window.png", entry: .init(
-                file: "02_full_window.png", type: "screen", name: "Full window"
-            ))
-        }
+        // Use window-server capture for the full window: CGWindowListCreateImage composites all
+        // layers (including wantsUpdateLayer views) exactly as the user sees them on screen.
+        captureWindow(wc.window, filename: "02_full_window.png", entry: .init(
+            file: "02_full_window.png", type: "screen", name: "Full window"
+        ))
 
         let composer = ComposerWindow(mode: .compose)
         composer.window.setFrame(NSRect(x: 0, y: 0, width: 600, height: 500), display: true)
@@ -181,6 +189,38 @@ final class UIReviewRunner: NSObject {
     }
 
     // MARK: - Helpers
+
+    /// Captures a window via CGWindowListCreateImage — composites all layers as the user sees them.
+    private func captureWindow(_ window: NSWindow, filename: String, entry: ScreenshotEntry) {
+        let windowID = CGWindowID(window.windowNumber)
+        guard let cgImage = CGWindowListCreateImage(
+            .null,
+            .optionIncludingWindow,
+            windowID,
+            [.boundsIgnoreFraming, .bestResolution]
+        ) else {
+            // Fallback to cacheDisplay if window-server capture unavailable
+            if let contentView = window.contentView {
+                captureView(contentView, filename: filename, entry: entry)
+            }
+            return
+        }
+        let size = CGSize(width: cgImage.width, height: cgImage.height)
+        let image = NSImage(cgImage: cgImage, size: size)
+        guard let tiffData = image.tiffRepresentation,
+              let bitmapRep = NSBitmapImageRep(data: tiffData),
+              let pngData = bitmapRep.representation(using: .png, properties: [:]) else {
+            print("Failed to convert \(filename) to PNG")
+            return
+        }
+        let filePath = (outputDir as NSString).appendingPathComponent(filename)
+        do {
+            try pngData.write(to: URL(fileURLWithPath: filePath))
+        } catch {
+            print("Failed to write \(filename): \(error)")
+        }
+        manifest.screenshots.append(entry)
+    }
 
     private func captureView(_ view: NSView, filename: String, entry: ScreenshotEntry) {
         guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {

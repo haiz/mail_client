@@ -5,15 +5,33 @@ import AppKit
 final class ComposerWindow: NSObject {
 
     private(set) var window: NSWindow
+    private let fromPopup: NSPopUpButton
     private let toField: NSTextField
     private let ccField: NSTextField
+    private let bccField: NSTextField
     private let subjectField: NSTextField
     private let bodyTextView: NSTextView
     private let bodyScrollView: NSScrollView
     private let sendButton: NSButton
 
+    private let attachButton: NSButton
+    private let attachmentChipsBar: NSStackView
+
     private var autoSaveTimer: Timer?
     private var draftId: Int64?
+
+    /// Files attached by the user.
+    private var pendingAttachments: [OutgoingAttachment] = []
+
+    /// Account list for the From selector. Each entry is (id, email).
+    private var accounts: [(id: String, email: String)] = []
+
+    /// The account ID selected in the From popup.
+    var selectedAccountId: String? {
+        guard fromPopup.indexOfSelectedItem >= 0,
+              fromPopup.indexOfSelectedItem < accounts.count else { return nil }
+        return accounts[fromPopup.indexOfSelectedItem].id
+    }
 
     /// Injected by AppDelegate for contact autocomplete.
     var contactsStore: ContactsStore?
@@ -54,6 +72,11 @@ final class ComposerWindow: NSObject {
         window.center()
         window.minSize = NSSize(width: 400, height: 300)
 
+        // From selector
+        fromPopup = NSPopUpButton()
+        fromPopup.font = .systemFont(ofSize: 13)
+        fromPopup.controlSize = .regular
+
         // Fields
         toField = NSTextField()
         toField.placeholderString = "To"
@@ -62,6 +85,10 @@ final class ComposerWindow: NSObject {
         ccField = NSTextField()
         ccField.placeholderString = "Cc"
         ccField.font = .systemFont(ofSize: 13)
+
+        bccField = NSTextField()
+        bccField.placeholderString = "Bcc"
+        bccField.font = .systemFont(ofSize: 13)
 
         subjectField = NSTextField()
         subjectField.placeholderString = "Subject"
@@ -82,6 +109,16 @@ final class ComposerWindow: NSObject {
         bodyScrollView.hasVerticalScroller = true
         bodyScrollView.autohidesScrollers = true
 
+        // Attach button
+        attachButton = CursorButton(image: NSImage(systemSymbolName: "paperclip", accessibilityDescription: "Attach File")!, target: nil, action: nil)
+        attachButton.bezelStyle = .accessoryBarAction
+
+        // Attachment chips bar (shows attached file names)
+        attachmentChipsBar = NSStackView()
+        attachmentChipsBar.orientation = .horizontal
+        attachmentChipsBar.spacing = 6
+        attachmentChipsBar.isHidden = true
+
         // Send button
         sendButton = CursorButton(title: "Send", target: nil, action: nil)
         sendButton.bezelStyle = .rounded
@@ -95,13 +132,28 @@ final class ComposerWindow: NSObject {
 
         toField.delegate = self
         ccField.delegate = self
+        bccField.delegate = self
 
+        attachButton.target = self
+        attachButton.action = #selector(attachClicked)
         sendButton.target = self
         sendButton.action = #selector(sendClicked)
 
         setupLayout()
         prefill(mode: mode)
         startAutoSave()
+    }
+
+    /// Populate the From popup with available accounts. Select the given accountId.
+    func setAccounts(_ list: [(id: String, email: String)], selected: String?) {
+        accounts = list
+        fromPopup.removeAllItems()
+        for account in list {
+            fromPopup.addItem(withTitle: account.email)
+        }
+        if let selected, let idx = list.firstIndex(where: { $0.id == selected }) {
+            fromPopup.selectItem(at: idx)
+        }
     }
 
     func show() {
@@ -117,6 +169,7 @@ final class ComposerWindow: NSObject {
         // dangling pointer and crashes during the next CA commit.
         toField.delegate = nil
         ccField.delegate = nil
+        bccField.delegate = nil
         window.close()
     }
 
@@ -188,16 +241,32 @@ final class ComposerWindow: NSObject {
     private func setupLayout() {
         let container = NSView()
 
-        let fields: [(NSTextField, String)] = [
-            (toField, "To:"),
-            (ccField, "Cc:"),
-            (subjectField, "Subject:"),
-        ]
-
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.spacing = 6
         stack.translatesAutoresizingMaskIntoConstraints = false
+
+        // From row (popup button, not text field)
+        let fromRow = NSStackView()
+        fromRow.orientation = .horizontal
+        fromRow.spacing = 8
+        let fromLabel = NSTextField(labelWithString: "From:")
+        fromLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        fromLabel.textColor = .secondaryLabelColor
+        fromLabel.widthAnchor.constraint(equalToConstant: 60).isActive = true
+        fromLabel.alignment = .right
+        fromPopup.translatesAutoresizingMaskIntoConstraints = false
+        fromRow.addArrangedSubview(fromLabel)
+        fromRow.addArrangedSubview(fromPopup)
+        stack.addArrangedSubview(fromRow)
+
+        // Recipient + subject fields
+        let fields: [(NSTextField, String)] = [
+            (toField, "To:"),
+            (ccField, "Cc:"),
+            (bccField, "Bcc:"),
+            (subjectField, "Subject:"),
+        ]
 
         for (field, label) in fields {
             let row = NSStackView()
@@ -240,13 +309,16 @@ final class ComposerWindow: NSObject {
         let linkBtn = CursorButton(image: NSImage(systemSymbolName: "link", accessibilityDescription: "Insert Link")!, target: self, action: #selector(insertLink))
         linkBtn.bezelStyle = .accessoryBarAction
 
-        let formatBar = NSStackView(views: [boldBtn, italicBtn, underlineBtn, linkBtn])
+        let formatBar = NSStackView(views: [boldBtn, italicBtn, underlineBtn, linkBtn, attachButton])
         formatBar.spacing = 2
         formatBar.translatesAutoresizingMaskIntoConstraints = false
+
+        attachmentChipsBar.translatesAutoresizingMaskIntoConstraints = false
 
         container.addSubview(stack)
         container.addSubview(separator)
         container.addSubview(formatBar)
+        container.addSubview(attachmentChipsBar)
         container.addSubview(bodyScrollView)
         container.addSubview(toolbar)
 
@@ -262,7 +334,11 @@ final class ComposerWindow: NSObject {
             formatBar.topAnchor.constraint(equalTo: separator.bottomAnchor, constant: 4),
             formatBar.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
 
-            bodyScrollView.topAnchor.constraint(equalTo: formatBar.bottomAnchor, constant: 4),
+            attachmentChipsBar.topAnchor.constraint(equalTo: formatBar.bottomAnchor, constant: 4),
+            attachmentChipsBar.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
+            attachmentChipsBar.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -12),
+
+            bodyScrollView.topAnchor.constraint(equalTo: attachmentChipsBar.bottomAnchor, constant: 4),
             bodyScrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             bodyScrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             bodyScrollView.bottomAnchor.constraint(equalTo: toolbar.topAnchor),
@@ -384,6 +460,45 @@ final class ComposerWindow: NSObject {
         }
     }
 
+    @objc private func attachClicked() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        guard panel.runModal() == .OK else { return }
+
+        for url in panel.urls {
+            guard let data = try? Data(contentsOf: url) else { continue }
+            let mimeType = Self.mimeType(for: url.pathExtension)
+            let attachment = OutgoingAttachment(filename: url.lastPathComponent, mimeType: mimeType, data: data)
+            pendingAttachments.append(attachment)
+        }
+        refreshAttachmentChips()
+    }
+
+    private func refreshAttachmentChips() {
+        attachmentChipsBar.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        guard !pendingAttachments.isEmpty else {
+            attachmentChipsBar.isHidden = true
+            return
+        }
+        attachmentChipsBar.isHidden = false
+        for (index, att) in pendingAttachments.enumerated() {
+            let chip = CursorButton(title: "\(att.filename) ✕", target: self, action: #selector(removeAttachment(_:)))
+            chip.font = .systemFont(ofSize: 11)
+            chip.bezelStyle = .accessoryBarAction
+            chip.tag = index
+            attachmentChipsBar.addArrangedSubview(chip)
+        }
+    }
+
+    @objc private func removeAttachment(_ sender: NSButton) {
+        let index = sender.tag
+        guard index >= 0, index < pendingAttachments.count else { return }
+        pendingAttachments.remove(at: index)
+        refreshAttachmentChips()
+    }
+
     @objc private func sendClicked() {
         let message = buildMessage()
         guard !message.to.isEmpty else {
@@ -430,14 +545,20 @@ final class ComposerWindow: NSObject {
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
 
+        let bcc = bccField.stringValue
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+
         return OutgoingMessage(
             to: to,
             cc: cc,
-            bcc: [],
+            bcc: bcc,
             subject: subjectField.stringValue,
             bodyText: bodyTextView.string,
             bodyHtml: nil,
-            inReplyTo: nil
+            inReplyTo: nil,
+            attachments: pendingAttachments
         )
     }
 
@@ -471,6 +592,24 @@ final class ComposerWindow: NSObject {
         f.timeStyle = .short
         return f
     }()
+
+    private static func mimeType(for ext: String) -> String {
+        switch ext.lowercased() {
+        case "pdf": return "application/pdf"
+        case "png": return "image/png"
+        case "jpg", "jpeg": return "image/jpeg"
+        case "gif": return "image/gif"
+        case "txt": return "text/plain"
+        case "html", "htm": return "text/html"
+        case "zip": return "application/zip"
+        case "doc": return "application/msword"
+        case "docx": return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        case "xls": return "application/vnd.ms-excel"
+        case "xlsx": return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        case "csv": return "text/csv"
+        default: return "application/octet-stream"
+        }
+    }
 }
 
 // MARK: - NSTextFieldDelegate (contacts autocomplete)
@@ -478,7 +617,7 @@ final class ComposerWindow: NSObject {
 extension ComposerWindow: NSTextFieldDelegate {
     func controlTextDidChange(_ obj: Notification) {
         guard let field = obj.object as? NSTextField,
-              (field === toField || field === ccField) else { return }
+              (field === toField || field === ccField || field === bccField) else { return }
 
         let token = currentToken(in: field.stringValue)
         guard token.count >= 2 else { return }

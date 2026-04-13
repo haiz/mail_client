@@ -210,7 +210,7 @@ actor AccountManager: MailEngineProtocol {
 
     func listFolders(accountId: String) async throws -> [MailFolder] {
         let folders = try await store.listFolders(accountId: accountId)
-        return folders.map { MailFolder(id: $0.folder, name: Self.displayName(for: $0.folder), unreadCount: $0.unreadCount, role: Self.folderRole(for: $0.folder)) }
+        return folders.map { MailFolder(id: $0.folder, name: Self.displayName(for: $0.folder), totalCount: $0.totalCount, hasUnread: $0.hasUnread, role: Self.folderRole(for: $0.folder)) }
     }
 
     // MARK: - Actions

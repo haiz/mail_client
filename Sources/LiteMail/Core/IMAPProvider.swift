@@ -141,12 +141,19 @@ actor IMAPProvider: MailProvider {
 
         let startSeq = UInt32(max(1, messageCount - 4999))
         let range = SequenceNumber(startSeq)...SequenceNumber(UInt32(messageCount))
-        let headers = try await imap.fetchMessageInfos(sequenceRange: range)
+        let seqSet = SequenceNumberSet(range)
 
-        for info in headers {
+        // Use the chunked streaming API (batches of 50) to avoid
+        // hitting the 10-second per-command timeout on large folders.
+        var lastUid: Int?
+        let stream = imap.fetchMessageInfos(using: seqSet)
+        for try await info in stream {
             let record = Self.toEmailRecord(info, folder: folderId, accountId: accountId)
             if let emailId = try? await store.insertEmail(record) {
                 await storeAttachmentMetadata(info: info, emailId: emailId)
+            }
+            if let uid = info.uid {
+                lastUid = Int(uid.value)
             }
         }
 
@@ -154,7 +161,6 @@ actor IMAPProvider: MailProvider {
         // Pre-fetching here is skipped: sequence-range fetches don't include UIDs,
         // causing FetchStructureCommand<UID> to fail on Gmail.
 
-        let lastUid: Int? = headers.last?.uid.map { Int($0.value) }
         let syncState = SyncStateRecord(
             accountId: accountId,
             folder: folderId,
