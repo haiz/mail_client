@@ -261,6 +261,30 @@ actor MailStore {
             }
         }
 
+        // v7: phased delete state + delete_jobs queue.
+        // See docs/superpowers/specs/2026-04-13-phased-delete-reconciliation.md
+        migrator.registerMigration("v7_delete_state_and_jobs") { db in
+            try db.alter(table: "emails") { t in
+                t.add(column: "delete_state", .text).notNull().defaults(to: "synced")
+            }
+            try db.create(index: "idx_emails_delete_state", on: "emails", columns: ["delete_state"])
+
+            try db.create(table: "delete_jobs") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("account_id", .text).notNull()
+                t.column("email_id", .integer).notNull().references("emails", onDelete: .cascade)
+                t.column("folder", .text).notNull()
+                t.column("uid", .integer).notNull()
+                t.column("state", .text).notNull().defaults(to: "queued")
+                t.column("attempts", .integer).notNull().defaults(to: 0)
+                t.column("last_error", .text)
+                t.column("next_attempt_at", .integer).notNull()
+                t.column("created_at", .integer).notNull()
+            }
+            try db.create(index: "idx_delete_jobs_due", on: "delete_jobs", columns: ["state", "next_attempt_at"])
+            try db.create(index: "idx_delete_jobs_email", on: "delete_jobs", columns: ["email_id"])
+        }
+
         try migrator.migrate(dbPool)
     }
 

@@ -293,6 +293,31 @@ final class MailStoreTests: XCTestCase {
         XCTAssertTrue(acc2Results.isEmpty)
     }
 
+    // MARK: - Migration Tests
+
+    func testV7MigrationAddsDeleteStateAndDeleteJobs() async throws {
+        let path = NSTemporaryDirectory() + "litemail_v7_\(UUID().uuidString).sqlite"
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let store = try MailStore(path: path)
+
+        let columns: [String] = try await store.concurrentReader.read { db in
+            try Row.fetchAll(db, sql: "PRAGMA table_info(emails)").compactMap { $0["name"] as String? }
+        }
+        XCTAssertTrue(columns.contains("delete_state"), "emails.delete_state missing")
+
+        let hasTable: Int = try await store.concurrentReader.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='delete_jobs'") ?? 0
+        }
+        XCTAssertEqual(hasTable, 1, "delete_jobs table missing")
+
+        let defaultState: String? = try await store.concurrentReader.read { db in
+            try String.fetchOne(db, sql: """
+                SELECT dflt_value FROM pragma_table_info('emails') WHERE name='delete_state'
+            """)
+        }
+        XCTAssertEqual(defaultState, "'synced'")
+    }
+
     // MARK: - Helpers
 
     private func makeEmail(
