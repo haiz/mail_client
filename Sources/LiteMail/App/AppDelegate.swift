@@ -136,6 +136,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             Task {
                 try await manager.loadAccounts()
+                await manager.startDeleteWorker()
                 let accounts = try await manager.listAccounts()
 
                 if accounts.isEmpty {

@@ -14,11 +14,27 @@ actor AccountManager: MailEngineProtocol {
     private var providers: [String: any MailProvider] = [:]
     private var syncTasks: [String: Task<Void, Never>] = [:]
     private let providerFactory: ProviderFactory?
+    let deleteWorker: DeleteWorker
 
     init(store: MailStore, authManager: AuthManager, providerFactory: ProviderFactory? = nil) {
         self.store = store
         self.authManager = authManager
         self.providerFactory = providerFactory
+        // providerLookup is a temporary no-op; replaced in startDeleteWorker().
+        self.deleteWorker = DeleteWorker(
+            store: store,
+            providerLookup: { _ in nil }
+        )
+    }
+
+    /// Configures the delete worker's provider lookup and starts the tick loop.
+    /// Must be called once after init (e.g. in loadAccounts or applicationDidFinishLaunching).
+    func startDeleteWorker() async {
+        await deleteWorker.setProviderLookup { [weak self] accountId in
+            await self?.providers[accountId]
+        }
+        try? await store.resetRunningDeleteJobs()
+        await deleteWorker.start()
     }
 
     /// Loads providers for all stored accounts.
@@ -256,11 +272,9 @@ actor AccountManager: MailEngineProtocol {
 
     func deleteBatch(emailIds: [Int64]) async throws {
         guard !emailIds.isEmpty else { return }
-        try await store.markDeletedBatch(emailIds: emailIds)
-        let groups = try await groupByAccount(emailIds: emailIds)
-        for (provider, refs) in groups {
-            Task { try? await provider.deleteMessageBatch(messageRefs: refs) }
-        }
+        let records = try await store.fetchEmailRecords(ids: emailIds)
+        try await store.enqueueDeletes(records: records)
+        await deleteWorker.kick()
     }
 
     func archiveBatch(emailIds: [Int64]) async throws {

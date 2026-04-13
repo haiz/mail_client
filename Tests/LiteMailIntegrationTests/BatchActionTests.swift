@@ -5,9 +5,10 @@ final class BatchActionTests: XCTestCase {
 
     // MARK: - deleteBatch
 
-    func testDeleteBatchUpdatesStoreAndDispatchesProvider() async throws {
+    func testDeleteBatchEnqueuesAndWorkerDrainsToProvider() async throws {
         let (manager, mockProvider, store) = try await makeTestAccountManager()
         try await manager.addAccount(TestData.makeAccountConfig())
+        await manager.startDeleteWorker()
 
         let id1 = try await store.insertEmail(TestData.makeEmailRecord(messageId: "<del-b-1@test>", uid: 100))
         let id2 = try await store.insertEmail(TestData.makeEmailRecord(messageId: "<del-b-2@test>", uid: 101))
@@ -15,16 +16,13 @@ final class BatchActionTests: XCTestCase {
 
         try await manager.deleteBatch(emailIds: [id1, id2, id3])
 
-        // Store must reflect deleted immediately (optimistic)
-        for id in [id1, id2, id3] {
-            let record = try await store.fetchEmailRecord(id: id)
-            XCTAssertEqual(record?.isDeleted, true, "email \(id) should be marked deleted")
-        }
+        // kick() inside deleteBatch runs the worker once; if the mock succeeds,
+        // the emails should be hard-deleted by now.
+        let remaining = try await store.fetchEmailRecords(ids: [id1, id2, id3])
+        XCTAssertTrue(remaining.isEmpty, "success path: emails hard-deleted after worker drain")
 
-        // Provider batch call dispatched in background Task — wait briefly
-        try await Task.sleep(nanoseconds: 100_000_000)
         let deleteCalls = await mockProvider.deleteCalls
-        XCTAssertEqual(deleteCalls.count, 3, "provider should receive 3 delete refs")
+        XCTAssertEqual(deleteCalls.count, 3)
     }
 
     // MARK: - markReadBatch
@@ -182,6 +180,7 @@ final class BatchActionTests: XCTestCase {
         // Add both accounts
         try await manager.addAccount(TestData.makeAccountConfig(id: "account-a", email: "a@example.com"))
         try await manager.addAccount(TestData.makeAccountConfig(id: "account-b", email: "b@example.com"))
+        await manager.startDeleteWorker()
 
         // Insert emails for each account
         let idA1 = try await store.insertEmail(TestData.makeEmailRecord(messageId: "<xa-1@test>", accountId: "account-a", uid: 700))
@@ -190,14 +189,11 @@ final class BatchActionTests: XCTestCase {
 
         try await manager.deleteBatch(emailIds: [idA1, idA2, idB1])
 
-        // All three marked deleted in store
-        for id in [idA1, idA2, idB1] {
-            let record = try await store.fetchEmailRecord(id: id)
-            XCTAssertEqual(record?.isDeleted, true, "email \(id) should be deleted")
-        }
+        // Worker drain via kick() hard-deletes all three
+        let remaining = try await store.fetchEmailRecords(ids: [idA1, idA2, idB1])
+        XCTAssertTrue(remaining.isEmpty, "all emails hard-deleted after worker drain")
 
         // Each provider gets only its own refs
-        try await Task.sleep(nanoseconds: 150_000_000)
         let deleteA = await providerA.deleteCalls
         let deleteB = await providerB.deleteCalls
         XCTAssertEqual(deleteA.count, 2, "account-a provider should receive 2 delete refs")

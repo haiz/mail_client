@@ -6,16 +6,21 @@ import Foundation
 /// UI signaling (toasts, badges) happens via posts to `NotificationCenter` on permanent failure.
 actor DeleteWorker {
     private let store: MailStore
-    private let providerLookup: @Sendable (_ accountId: String) -> (any MailProvider)?
+    private var providerLookup: @Sendable (_ accountId: String) async -> (any MailProvider)?
     private var tickTask: Task<Void, Never>?
     private let batchLimit: Int
 
     init(store: MailStore,
-         providerLookup: @escaping @Sendable (String) -> (any MailProvider)?,
+         providerLookup: @escaping @Sendable (String) async -> (any MailProvider)?,
          batchLimit: Int = 200) {
         self.store = store
         self.providerLookup = providerLookup
         self.batchLimit = batchLimit
+    }
+
+    /// Replaces the provider lookup closure. Used by AccountManager after init.
+    func setProviderLookup(_ lookup: @escaping @Sendable (String) async -> (any MailProvider)?) {
+        self.providerLookup = lookup
     }
 
     /// Starts a 10-second ticker. Idempotent.
@@ -63,7 +68,7 @@ actor DeleteWorker {
     }
 
     private func processGroup(accountId: String, folder: String, jobs: [DeleteJobRecord], now: Int) async {
-        guard let provider = providerLookup(accountId) else {
+        guard let provider = await providerLookup(accountId) else {
             // No provider — transient: maybe account not loaded yet.
             do {
                 try await store.failDeleteJobsTransient(
