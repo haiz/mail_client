@@ -690,6 +690,32 @@ actor MailStore {
         }
     }
 
+    // MARK: - Delete Reconciliation
+
+    /// Returns (emailId, uid) for every pending_delete row in the given folder.
+    func fetchPendingDeleteUids(accountId: String, folder: String) throws -> [(emailId: Int64, uid: Int)] {
+        try dbPool.read { db in
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT id, uid FROM emails
+                WHERE account_id = ? AND folder = ? AND delete_state = 'pending_delete' AND uid IS NOT NULL
+            """, arguments: [accountId, folder])
+            return rows.map { (emailId: $0["id"], uid: $0["uid"]) }
+        }
+    }
+
+    /// Hard-deletes emails confirmed absent from server + their jobs.
+    func confirmDeletesByEmailIds(_ emailIds: [Int64]) throws {
+        guard !emailIds.isEmpty else { return }
+        let placeholders = emailIds.map { _ in "?" }.joined(separator: ",")
+        let args = emailIds.map { $0 as DatabaseValueConvertible }
+        try dbPool.write { db in
+            try db.execute(sql: "DELETE FROM delete_jobs WHERE email_id IN (\(placeholders))",
+                           arguments: StatementArguments(args))
+            try db.execute(sql: "DELETE FROM emails WHERE id IN (\(placeholders))",
+                           arguments: StatementArguments(args))
+        }
+    }
+
     // MARK: - Attachments
 
     func insertAttachments(_ attachments: [AttachmentRecord]) throws {

@@ -213,6 +213,44 @@ actor IMAPProvider: MailProvider {
             lastSync: Int(Date().timeIntervalSince1970)
         )
         try await store.updateSyncState(updatedState)
+
+        // Reconcile any pending_delete rows in this folder against server state.
+        await reconcilePendingDeletes(imap: imap, folderId: folderId)
+    }
+
+    // MARK: - Reconciliation
+
+    /// Compares local pending_delete rows for this folder against server UIDs.
+    /// UIDs absent on server → hard-delete locally (server already expunged).
+    /// UIDs still present → leave alone; worker will retry.
+    /// Best-effort: errors are caught and logged, never fail the sync.
+    private func reconcilePendingDeletes(imap: IMAPServer, folderId: String) async {
+        let pending: [(emailId: Int64, uid: Int)]
+        do {
+            pending = try await store.fetchPendingDeleteUids(accountId: accountId, folder: folderId)
+        } catch {
+            return
+        }
+        guard !pending.isEmpty else { return }
+
+        // Fetch the UID range that covers our pending UIDs. UIDs present on server
+        // are returned; missing ones were already expunged.
+        let uids = pending.map { $0.uid }
+        let minUid = UID(UInt32(uids.min()!))
+        let maxUid = UID(UInt32(uids.max()!))
+        let found: Set<Int>
+        do {
+            let infos = try await imap.fetchMessageInfos(uidRange: minUid...maxUid)
+            found = Set(infos.compactMap { $0.uid.map { Int($0.value) } })
+        } catch {
+            print("DeleteWorker reconciliation: UID fetch failed for \(folderId): \(error)")
+            return
+        }
+
+        let missing = pending.filter { !found.contains($0.uid) }.map(\.emailId)
+        if !missing.isEmpty {
+            try? await store.confirmDeletesByEmailIds(missing)
+        }
     }
 
     // MARK: - Push
