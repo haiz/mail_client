@@ -343,6 +343,32 @@ final class MailStoreTests: XCTestCase {
         XCTAssertEqual(fetched?.deleteState, "pending_delete")
     }
 
+    // MARK: - DeleteJobRecord Tests
+
+    func testDeleteJobRecordRoundTrip() async throws {
+        let path = NSTemporaryDirectory() + "litemail_djr_\(UUID().uuidString).sqlite"
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let store = try MailStore(path: path)
+        let acc = AccountRecord(id: "a1", emailAddress: "x@y.z", protocolType: "imap",
+                                authType: "password", keychainRef: "k", isDefault: true)
+        try await store.insertAccount(acc)
+        let em = EmailRecord(messageId: "m@x", folder: "INBOX", senderEmail: "s@x",
+                             date: 0, isRead: false, isStarred: false, isDeleted: false,
+                             hasAttachments: false, uid: 1, accountId: "a1")
+        let emailId = try await store.insertEmail(em)
+
+        let job = DeleteJobRecord(
+            id: nil, accountId: "a1", emailId: emailId, folder: "INBOX", uid: 1,
+            state: "queued", attempts: 0, lastError: nil,
+            nextAttemptAt: 100, createdAt: 100
+        )
+        let saved: DeleteJobRecord = try await store.insertDeleteJob(job)
+        XCTAssertNotNil(saved.id)
+        XCTAssertEqual(saved.folder, "INBOX")
+        XCTAssertEqual(saved.uid, 1)
+        XCTAssertEqual(saved.state, "queued")
+    }
+
     // MARK: - Helpers
 
     private func makeEmail(

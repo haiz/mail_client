@@ -549,6 +549,17 @@ actor MailStore {
         }
     }
 
+    // MARK: - Delete Job Queue
+
+    func insertDeleteJob(_ job: DeleteJobRecord) throws -> DeleteJobRecord {
+        try dbPool.write { db in
+            var j = job
+            try j.insert(db)
+            j.id = db.lastInsertedRowID
+            return j
+        }
+    }
+
     // MARK: - Attachments
 
     func insertAttachments(_ attachments: [AttachmentRecord]) throws {
@@ -794,6 +805,30 @@ struct EmailRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         case createdAt = "created_at"
         case accountId = "account_id"
         case deleteState = "delete_state"
+    }
+}
+
+struct DeleteJobRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
+    static let databaseTableName = "delete_jobs"
+
+    var id: Int64?
+    var accountId: String
+    var emailId: Int64
+    var folder: String
+    var uid: Int
+    var state: String        // "queued" | "running" | "failed"
+    var attempts: Int
+    var lastError: String?
+    var nextAttemptAt: Int   // unix seconds
+    var createdAt: Int
+
+    enum CodingKeys: String, CodingKey {
+        case id, folder, uid, state, attempts
+        case accountId = "account_id"
+        case emailId = "email_id"
+        case lastError = "last_error"
+        case nextAttemptAt = "next_attempt_at"
+        case createdAt = "created_at"
     }
 }
 
