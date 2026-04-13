@@ -289,17 +289,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Falls back to the original ID if no thread is found.
     private func expandThreadIds(_ ids: [Int64]) async throws -> [Int64] {
         guard let accountManager else { return ids }
-        var expanded = Set<Int64>()
+        var expanded = Set<Int64>(ids)
         let groups = windowController?.messageListView.threadGroups ?? []
+        let folder = currentFolder
         for id in ids {
             if let group = groups.first(where: { $0.primaryHeader.id == id }),
                let threadId = group.threadId {
-                let threadMembers = try await accountManager.fetchThread(threadId: threadId)
-                for header in threadMembers {
+                let members = try await accountManager.fetchThread(threadId: threadId)
+                for header in members where header.folder == folder {
                     expanded.insert(header.id)
                 }
-            } else {
-                expanded.insert(id)
             }
         }
         return Array(expanded)
@@ -377,7 +376,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         description: deleteDesc,
                         reverseOperation: { [weak self] in
                             guard let store = self?.accountManager?.store else { return }
-                            try await store.unmarkDeletedBatch(emailIds: expandedIds)
+                            try await store.cancelPendingDeletes(emailIds: expandedIds)
                         },
                         emailIds: expandedIds
                     )

@@ -576,6 +576,25 @@ actor MailStore {
         }
     }
 
+    /// Reverts pending_delete rows to synced and removes their queued jobs.
+    /// If a job is already 'running', it's left alone — worker is past the point of no return.
+    func cancelPendingDeletes(emailIds: [Int64]) throws {
+        guard !emailIds.isEmpty else { return }
+        let placeholders = emailIds.map { _ in "?" }.joined(separator: ",")
+        let args = emailIds.map { $0 as DatabaseValueConvertible }
+        try dbPool.write { db in
+            try db.execute(
+                sql: "DELETE FROM delete_jobs WHERE email_id IN (\(placeholders)) AND state = 'queued'",
+                arguments: StatementArguments(args)
+            )
+            try db.execute(sql: """
+                UPDATE emails SET delete_state='synced'
+                WHERE id IN (\(placeholders))
+                  AND NOT EXISTS (SELECT 1 FROM delete_jobs WHERE email_id = emails.id)
+            """, arguments: StatementArguments(args))
+        }
+    }
+
     func insertDeleteJob(_ job: DeleteJobRecord) throws -> DeleteJobRecord {
         try dbPool.write { db in
             var j = job
