@@ -551,6 +551,28 @@ actor MailStore {
 
     // MARK: - Delete Job Queue
 
+    /// Atomically marks emails as pending_delete and inserts delete_jobs for each.
+    /// Records without a UID are skipped — they cannot be server-deleted.
+    /// Records without an accountId are skipped (defensive — shouldn't happen in practice).
+    func enqueueDeletes(records: [EmailRecord], now: Int = Int(Date().timeIntervalSince1970)) throws {
+        try dbPool.write { db in
+            for rec in records {
+                guard let id = rec.id, let uid = rec.uid, let accId = rec.accountId else { continue }
+                try db.execute(
+                    sql: "UPDATE emails SET delete_state = 'pending_delete' WHERE id = ?",
+                    arguments: [id]
+                )
+                var job = DeleteJobRecord(
+                    id: nil, accountId: accId, emailId: id,
+                    folder: rec.folder, uid: uid,
+                    state: "queued", attempts: 0, lastError: nil,
+                    nextAttemptAt: now, createdAt: now
+                )
+                try job.insert(db)
+            }
+        }
+    }
+
     func insertDeleteJob(_ job: DeleteJobRecord) throws -> DeleteJobRecord {
         try dbPool.write { db in
             var j = job

@@ -55,21 +55,21 @@ final class MailStoreBatchTests: XCTestCase {
 
     // MARK: - Helpers
 
+    private func insertTestEmail(folder: String = "INBOX", uid: Int? = nil) async throws -> Int64 {
+        let rec = EmailRecord(
+            messageId: "msg-\(UUID().uuidString)@test",
+            folder: folder, senderEmail: "s@test",
+            date: Int(Date().timeIntervalSince1970),
+            isRead: false, isStarred: false, isDeleted: false,
+            hasAttachments: false, uid: uid, accountId: testAccountId
+        )
+        return try await store.insertEmail(rec)
+    }
+
     private func insertTestEmails(count: Int, folder: String = "INBOX") async throws -> [Int64] {
         var ids: [Int64] = []
         for i in 1...count {
-            let record = EmailRecord(
-                messageId: "batch-\(UUID().uuidString)@test.com",
-                folder: folder,
-                senderEmail: "sender\(i)@test.com",
-                date: 1000 + i,
-                isRead: false,
-                isStarred: false,
-                isDeleted: false,
-                hasAttachments: false,
-                accountId: testAccountId
-            )
-            let id = try await store.insertEmail(record)
+            let id = try await insertTestEmail(folder: folder, uid: 1000 + i)
             ids.append(id)
         }
         return ids
@@ -140,5 +140,41 @@ final class MailStoreBatchTests: XCTestCase {
             let record = try await store.fetchEmailRecord(id: id)
             XCTAssertTrue(record!.isRead)
         }
+    }
+
+    // MARK: - Enqueue Deletes
+
+    func testEnqueueDeletesSetsStateAndCreatesJobsAtomically() async throws {
+        let ids = try await insertTestEmails(count: 3, folder: "INBOX")
+        let recs = try await store.fetchEmailRecords(ids: ids)
+        // Fill folder/uid that fetchEmailRecords already has
+        try await store.enqueueDeletes(records: recs, now: 1000)
+
+        let states: [String] = try await store.concurrentReader.read { db in
+            try String.fetchAll(db, sql: "SELECT delete_state FROM emails WHERE id IN (?,?,?)",
+                                arguments: [ids[0], ids[1], ids[2]])
+        }
+        XCTAssertEqual(Set(states), ["pending_delete"])
+
+        let jobCount: Int = try await store.concurrentReader.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM delete_jobs") ?? -1
+        }
+        XCTAssertEqual(jobCount, 3)
+    }
+
+    func testEnqueueDeletesSkipsRecordsWithoutUid() async throws {
+        // A record missing uid can't be deleted server-side; skip it and don't mark pending.
+        let id = try await insertTestEmail(folder: "INBOX", uid: nil)
+        let recs = try await store.fetchEmailRecords(ids: [id])
+        try await store.enqueueDeletes(records: recs, now: 1000)
+
+        let state: String? = try await store.concurrentReader.read { db in
+            try String.fetchOne(db, sql: "SELECT delete_state FROM emails WHERE id=?", arguments: [id])
+        }
+        XCTAssertEqual(state, "synced")
+        let jobCount: Int = try await store.concurrentReader.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM delete_jobs") ?? -1
+        }
+        XCTAssertEqual(jobCount, 0)
     }
 }
