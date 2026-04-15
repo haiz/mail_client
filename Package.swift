@@ -24,7 +24,8 @@ let package = Package(
                 .product(name: "AppAuth", package: "AppAuth-iOS"),
                 .product(name: "JMAPClient", package: "swift-jmap-client"),
             ],
-            path: "Sources/LiteMail"
+            path: "Sources/LiteMail",
+            resources: [.process("Resources")]
         ),
         .testTarget(
             name: "LiteMailTests",
