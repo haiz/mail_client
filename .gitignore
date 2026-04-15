@@ -8,3 +8,11 @@ DerivedData/
 *.o
 *.dylib
 .worktrees/
+
+# Local tooling state (per-machine, not for git)
+.claude/
+.gstack/
+.serena/
+
+# Planning/design docs from superpowers skills — local working artifacts
+docs/superpowers/
