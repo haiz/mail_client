@@ -369,6 +369,24 @@ final class MailStoreTests: XCTestCase {
         XCTAssertEqual(saved.state, "queued")
     }
 
+    // MARK: - Gmail Categories
+
+    func testGmailCategoryColumnExistsAfterMigration() async throws {
+        // Schema v8 adds emails.gmail_category. Existing rows should default to NULL.
+        let record = makeEmail(messageId: "<cat-default@example.com>", uid: 1)
+        let id = try await store.insertEmail(record)
+        let fetched = try await store.fetchEmailRecord(id: id)
+        XCTAssertNil(fetched?.gmailCategory)
+    }
+
+    func testGmailCategoryCanBeWrittenViaEmailRecord() async throws {
+        var record = makeEmail(messageId: "<cat-write@example.com>", uid: 2)
+        record.gmailCategory = "promotions"
+        let id = try await store.insertEmail(record)
+        let fetched = try await store.fetchEmailRecord(id: id)
+        XCTAssertEqual(fetched?.gmailCategory, "promotions")
+    }
+
     // MARK: - Helpers
 
     private func makeEmail(

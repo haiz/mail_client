@@ -285,6 +285,22 @@ actor MailStore {
             try db.create(index: "idx_delete_jobs_email", on: "delete_jobs", columns: ["email_id"])
         }
 
+        // v8: Gmail Categories.
+        // Adds gmail_category column for storing Gmail's inbox categorization
+        // (Personal/Primary, Promotions, Social, Updates, Forums, Purchases).
+        // NULL = not a Gmail account, or not yet classified, or no category.
+        // See docs/superpowers/specs/2026-04-16-gmail-categories-design.md
+        migrator.registerMigration("v8_gmail_category") { db in
+            try db.alter(table: "emails") { t in
+                t.add(column: "gmail_category", .text)
+            }
+            try db.create(
+                index: "idx_emails_account_category",
+                on: "emails",
+                columns: ["account_id", "gmail_category"]
+            )
+        }
+
         try migrator.migrate(dbPool)
     }
 
@@ -969,6 +985,7 @@ struct EmailRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var createdAt: Int?
     var accountId: String?
     var deleteState: String = "synced"
+    var gmailCategory: String?
 
     enum CodingKeys: String, CodingKey {
         case id, folder, subject, date, uid, flags, recipients
@@ -985,6 +1002,7 @@ struct EmailRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         case createdAt = "created_at"
         case accountId = "account_id"
         case deleteState = "delete_state"
+        case gmailCategory = "gmail_category"
     }
 }
 
