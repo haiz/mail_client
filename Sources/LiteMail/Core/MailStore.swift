@@ -409,6 +409,20 @@ actor MailStore {
         }
     }
 
+    /// Sets `gmail_category` for the message with the given account_id + message_id.
+    /// Silent no-op if no row matches. Used by GmailCategoriesService after sync.
+    func setGmailCategory(accountId: String, messageId: String, category: String) throws {
+        try dbPool.write { db in
+            // A message may appear in multiple folders for the same account (Gmail
+            // multi-label). All folder-copies get the same category — correct since
+            // the category is a property of the message, not the folder view.
+            try db.execute(
+                sql: "UPDATE emails SET gmail_category = ? WHERE account_id = ? AND message_id = ?",
+                arguments: [category, accountId, messageId]
+            )
+        }
+    }
+
     func fetchEmailRecord(id: Int64) throws -> EmailRecord? {
         try dbPool.read { db in
             try EmailRecord.fetchOne(db, key: id)

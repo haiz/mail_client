@@ -387,6 +387,61 @@ final class MailStoreTests: XCTestCase {
         XCTAssertEqual(fetched?.gmailCategory, "promotions")
     }
 
+    func testSetGmailCategoryUpdatesByMessageId() async throws {
+        let record = makeEmail(messageId: "<set-cat@example.com>", uid: 10)
+        _ = try await store.insertEmail(record)
+
+        try await store.setGmailCategory(
+            accountId: testAccountId,
+            messageId: "<set-cat@example.com>",
+            category: "social"
+        )
+
+        let rows = try await store.fetchHeaders(
+            accountId: testAccountId, folder: "INBOX",
+            offset: 0, limit: 10
+        )
+        XCTAssertEqual(rows.first?.gmailCategory, "social")
+    }
+
+    func testSetGmailCategoryIsScopedByAccountId() async throws {
+        // Insert a second account and an email there with the same message_id.
+        let other = AccountRecord(
+            id: "other-acc", emailAddress: "other@example.com",
+            protocolType: "imap", authType: "password",
+            keychainRef: "k2", isDefault: false
+        )
+        try await store.insertAccount(other)
+        let rec1 = makeEmail(messageId: "<shared@example.com>", uid: 11)
+        var rec2 = makeEmail(messageId: "<shared@example.com>", accountId: "other-acc", uid: 11)
+        rec2.folder = "INBOX"
+        _ = try await store.insertEmail(rec1)
+        _ = try await store.insertEmail(rec2)
+
+        try await store.setGmailCategory(
+            accountId: testAccountId,
+            messageId: "<shared@example.com>",
+            category: "promotions"
+        )
+
+        let mine = try await store.fetchHeaders(accountId: testAccountId, folder: "INBOX", offset: 0, limit: 10)
+        let theirs = try await store.fetchHeaders(accountId: "other-acc", folder: "INBOX", offset: 0, limit: 10)
+        XCTAssertEqual(mine.first?.gmailCategory, "promotions")
+        XCTAssertNil(theirs.first?.gmailCategory, "Other account's row must not be updated")
+    }
+
+    func testSetGmailCategoryNoMatchIsSilent() async throws {
+        // No row matches → no error, no rows changed.
+        try await store.setGmailCategory(
+            accountId: testAccountId,
+            messageId: "<does-not-exist@example.com>",
+            category: "updates"
+        )
+        // Insert is sanity check — no rows existed before, nothing should be added.
+        let count = try await store.emailCount(accountId: testAccountId)
+        XCTAssertEqual(count, 0)
+    }
+
     // MARK: - Helpers
 
     private func makeEmail(
