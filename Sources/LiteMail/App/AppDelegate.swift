@@ -24,6 +24,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// this mode — search results already include all matches cross-account.
     private var isSearching = false
 
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        if let url = Bundle.module.url(forResource: "AppIcon", withExtension: "icns"),
+           let image = NSImage(contentsOf: url) {
+            NSApplication.shared.applicationIconImage = image
+        }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         let wc = MainWindowController()
         windowController = wc
