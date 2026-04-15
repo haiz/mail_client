@@ -896,6 +896,16 @@ actor MailStore {
             return try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM emails WHERE is_deleted = 0") ?? 0
         }
     }
+
+    func folderEmailCount(accountId: String, folder: String) throws -> Int {
+        try dbPool.read { db in
+            try Int.fetchOne(
+                db,
+                sql: "SELECT COUNT(*) FROM emails WHERE account_id = ? AND folder = ? AND is_deleted = 0",
+                arguments: [accountId, folder]
+            ) ?? 0
+        }
+    }
 }
 
 // MARK: - GRDB Records

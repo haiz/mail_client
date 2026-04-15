@@ -111,9 +111,12 @@ actor AccountManager: MailEngineProtocol {
         try await store.warmSearchCache()
     }
 
-    func performIncrementalSync(accountId: String) async throws {
-        guard let provider = providers[accountId] else { return }
+    /// Returns `true` when a provider was found and sync was attempted.
+    @discardableResult
+    func performIncrementalSync(accountId: String) async throws -> Bool {
+        guard let provider = providers[accountId] else { return false }
         try await provider.performIncrementalSync()
+        return true
     }
 
     func syncAllAccounts() async throws {

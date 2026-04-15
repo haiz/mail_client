@@ -15,6 +15,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var syncStartTime: Date?
     private var syncBaseEmailCount = 0
     private var syncProgressTimer: Timer?
+    /// Infinite-scroll pagination state. `isLoadingMoreMessages` guards against
+    /// duplicate requests from rapid scroll events; `hasMoreMessages` is set to
+    /// false when the last page returned fewer rows than the requested limit.
+    private var isLoadingMoreMessages = false
+    private var hasMoreMessages = true
+    /// True while the user has an active search query. Pagination is disabled in
+    /// this mode — search results already include all matches cross-account.
+    private var isSearching = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let wc = MainWindowController()
@@ -35,6 +43,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         wc.messageListView.onSearchChanged = { [weak self] query in
             self?.performSearch(query: query)
+        }
+        wc.messageListView.onRequestLoadMore = { [weak self] in
+            self?.loadMoreMessages()
         }
         wc.messageListView.onCheckedIdsChanged = { [weak self] checkedIds in
             guard let self, let wc = self.windowController else { return }
@@ -166,6 +177,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         self?.windowController?.statusBar.updateSyncStatus(
                             "Couldn't delete \(count) message\(count == 1 ? "" : "s") — retry from folder view")
                     }
+                    // Reload the message list when the emails-per-page setting changes.
+                    NotificationCenter.default.addObserver(forName: .emailListLimitChanged,
+                                                           object: nil, queue: .main) { [weak self] _ in
+                        self?.loadMessages()
+                    }
                     // Kick off an immediate sync so the user sees emails on launch
                     if !accounts.isEmpty {
                         Task { await self.performSyncCycle() }
@@ -181,14 +197,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func loadMessages() {
         guard let accountManager, let accountId = currentAccountId else { return }
+        // Reset pagination state. Every folder/account switch and every action
+        // that calls loadMessages should start from a clean page.
+        isLoadingMoreMessages = false
+        hasMoreMessages = true
+        let limit = DisplayPreferences.emailListLimit
 
         Task { @MainActor in
             do {
-                let headers = try await accountManager.fetchHeaders(accountId: accountId, folder: currentFolder, offset: 0, limit: 200)
+                let headers = try await accountManager.fetchHeaders(accountId: accountId, folder: currentFolder, offset: 0, limit: limit)
                 windowController?.messageListView.update(messages: headers)
+                // Another page likely exists only if the current page filled the limit.
+                hasMoreMessages = headers.count >= limit
+                windowController?.messageListView.setCanLoadMore(hasMoreMessages && !isSearching)
                 updateStatusBar()
             } catch {
                 showError("Failed to load messages: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Fetch the next page and append it to the message list. Fired by
+    /// MessageListView when the user scrolls near the bottom.
+    private func loadMoreMessages() {
+        guard let accountManager, let accountId = currentAccountId else { return }
+        guard !isLoadingMoreMessages, hasMoreMessages, !isSearching else { return }
+        guard let listView = windowController?.messageListView else { return }
+        let currentCount = listView.messages.count
+        guard currentCount > 0 else { return }
+
+        isLoadingMoreMessages = true
+        let limit = DisplayPreferences.emailListLimit
+
+        Task { @MainActor in
+            defer { isLoadingMoreMessages = false }
+            do {
+                let headers = try await accountManager.fetchHeaders(
+                    accountId: accountId,
+                    folder: currentFolder,
+                    offset: currentCount,
+                    limit: limit
+                )
+                // Guard against stale responses: if the user switched folders/accounts
+                // while this request was in flight, its data no longer matches what's
+                // on screen. The listView's message count will have been reset by
+                // loadMessages(), so a mismatch signals the response is stale.
+                guard listView.messages.count == currentCount else { return }
+
+                listView.append(messages: headers)
+                hasMoreMessages = headers.count >= limit
+                listView.setCanLoadMore(hasMoreMessages && !isSearching)
+            } catch {
+                // Don't showError — it would pop a modal mid-scroll. Log and stop
+                // paginating so the user can retry by reopening the folder.
+                NSLog("Failed to load more messages: \(error.localizedDescription)")
+                listView.setCanLoadMore(false)
             }
         }
     }
@@ -275,15 +338,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let accountManager else { return }
 
         if query.isEmpty {
+            isSearching = false
             loadMessages()
             return
         }
 
+        isSearching = true
         Task { @MainActor in
             do {
                 // Cross-account search (accountId: nil)
                 let results = try await accountManager.search(query: query, accountId: nil)
                 windowController?.messageListView.update(messages: results)
+                // Search results are the complete match set — no pagination here.
+                windowController?.messageListView.setCanLoadMore(false)
             } catch {
                 showError("Search failed: \(error.localizedDescription)")
             }
@@ -604,6 +671,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func performSyncCycle() async {
         guard let accountManager, !isSyncing else { return }
         isSyncing = true
+        defer { isSyncing = false }
         syncStartTime = Date()
         syncBaseEmailCount = (try? await accountManager.store.emailCount()) ?? 0
 
@@ -611,11 +679,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         startSyncProgressTimer()
 
         // Sync all accounts the user has visited this session.
+        var didAttempt = false   // a provider existed and we tried
+        var didSucceed = false   // at least one account synced without error
         for accountId in activatedAccountIds {
             do {
-                try await accountManager.performIncrementalSync(accountId: accountId)
-                windowController?.sidebarView.setAuthError(for: accountId, hasError: false)
+                let ran = try await accountManager.performIncrementalSync(accountId: accountId)
+                if ran {
+                    didAttempt = true
+                    didSucceed = true
+                    windowController?.sidebarView.setAuthError(for: accountId, hasError: false)
+                }
             } catch {
+                didAttempt = true  // provider existed but sync failed
                 if isAuthError(error) {
                     windowController?.sidebarView.setAuthError(for: accountId, hasError: true)
                 }
@@ -623,7 +698,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         stopSyncProgressTimer()
-        isSyncing = false
         loadSidebar()
         loadMessages()
         updateStatusBar()
@@ -631,12 +705,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let fmt = DateFormatter()
         fmt.timeStyle = .short
         fmt.dateStyle = .none
-        let elapsed = Int(-(syncStartTime?.timeIntervalSinceNow ?? 0))
-        let finalCount = (try? await accountManager.store.emailCount()) ?? 0
-        let added = max(0, finalCount - syncBaseEmailCount)
-        let addedStr = added > 0 ? " · +\(Self.formatCount(added)) emails" : ""
-        windowController?.statusBar.updateSyncStatus("Synced \(fmt.string(from: Date())) (\(elapsed)s\(addedStr))")
-        windowController?.statusBar.updateConnection(status: .connected)
+
+        if !didAttempt {
+            // No account had a provider (e.g. demo/offline account).
+            windowController?.statusBar.updateSyncStatus("Offline — no mail server")
+            windowController?.statusBar.updateConnection(status: .offline)
+        } else if !didSucceed {
+            windowController?.statusBar.updateSyncStatus("Sync failed \(fmt.string(from: Date()))")
+            windowController?.statusBar.updateConnection(status: .disconnected)
+        } else {
+            let elapsed = Int(-(syncStartTime?.timeIntervalSinceNow ?? 0))
+            let finalCount = (try? await accountManager.store.emailCount()) ?? 0
+            let added = max(0, finalCount - syncBaseEmailCount)
+            let addedStr = added > 0 ? " · +\(Self.formatCount(added)) emails" : ""
+            windowController?.statusBar.updateSyncStatus("Synced \(fmt.string(from: Date())) (\(elapsed)s\(addedStr))")
+            windowController?.statusBar.updateConnection(status: .connected)
+        }
         syncStartTime = nil
     }
 

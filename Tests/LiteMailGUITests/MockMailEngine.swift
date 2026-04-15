@@ -38,7 +38,8 @@ final class MockMailEngine: MailEngineProtocol, @unchecked Sendable {
     func addAccount(_ config: AccountConfig) async throws { calls.append("addAccount"); accounts.append(config) }
     func removeAccount(id: String) async throws { calls.append("removeAccount"); accounts.removeAll { $0.id == id } }
     func performInitialSync(accountId: String) async throws { calls.append("initialSync"); syncCalls.append(accountId) }
-    func performIncrementalSync(accountId: String) async throws { calls.append("incrementalSync"); syncCalls.append(accountId) }
+    @discardableResult
+    func performIncrementalSync(accountId: String) async throws -> Bool { calls.append("incrementalSync"); syncCalls.append(accountId); return true }
     func syncAllAccounts() async throws { calls.append("syncAll"); for a in accounts { syncCalls.append(a.id) } }
     func search(query: String, accountId: String?) async throws -> [EmailHeader] { calls.append("search"); return searchResults }
 

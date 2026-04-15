@@ -7,6 +7,7 @@ final class SettingsWindow: NSObject {
     private let accountTableView: NSTableView
     private var signatureField: NSTextField?
     private var googleClientIdField: NSTextField?
+    private var emailListLimitPopup: NSPopUpButton?
 
     var onAddAccount: (() -> Void)?
     var onRemoveAccount: ((String) -> Void)?
@@ -20,7 +21,7 @@ final class SettingsWindow: NSObject {
         self.emailCount = emailCount
 
         window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 460, height: 520),
+            contentRect: NSRect(x: 0, y: 0, width: 460, height: 560),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -51,7 +52,7 @@ final class SettingsWindow: NSObject {
     private func setupLayout() {
         let container = NSView()
 
-        // Accounts section
+        // MARK: Accounts
         let accountHeader = Self.sectionHeader("Accounts")
 
         let scrollView = NSScrollView()
@@ -66,19 +67,34 @@ final class SettingsWindow: NSObject {
         let removeButton = CursorButton(title: "Remove", target: self, action: #selector(removeClicked))
         removeButton.bezelStyle = .rounded
 
-        let accountButtons = NSStackView(views: [addButton, removeButton])
-        accountButtons.spacing = 8
-
-        // Stats section
-        let statsHeader = Self.sectionHeader("Stats")
-        let countLabel = NSTextField(labelWithString: "Total emails: \(emailCount)")
-        countLabel.font = .systemFont(ofSize: 13)
-
         let syncButton = CursorButton(title: "Sync All", target: self, action: #selector(syncClicked))
         syncButton.bezelStyle = .rounded
 
-        // Signature section
-        let sigHeader = Self.sectionHeader("Signature")
+        let accountButtons = NSStackView(views: [addButton, removeButton, syncButton])
+        accountButtons.spacing = 8
+
+        // MARK: Appearance
+        let appearanceHeader = Self.sectionHeader("Appearance")
+
+        let limitLabel = NSTextField(labelWithString: "Emails per page:")
+        limitLabel.font = .systemFont(ofSize: 13)
+
+        let limitPopup = NSPopUpButton()
+        limitPopup.target = self
+        limitPopup.action = #selector(emailListLimitChanged(_:))
+        for preset in DisplayPreferences.emailListLimitPresets {
+            limitPopup.addItem(withTitle: "\(preset)")
+            limitPopup.lastItem?.tag = preset
+        }
+        limitPopup.selectItem(withTag: DisplayPreferences.emailListLimit)
+        self.emailListLimitPopup = limitPopup
+
+        let limitRow = NSStackView(views: [limitLabel, limitPopup])
+        limitRow.spacing = 8
+        limitRow.alignment = .firstBaseline
+
+        // MARK: Composing
+        let composingHeader = Self.sectionHeader("Composing")
         let sigField = NSTextField()
         sigField.placeholderString = "Your email signature..."
         sigField.stringValue = UserDefaults.standard.string(forKey: "email_signature") ?? ""
@@ -91,8 +107,8 @@ final class SettingsWindow: NSObject {
         saveSigButton.bezelStyle = .rounded
         self.signatureField = sigField
 
-        // Google section
-        let googleHeader = Self.sectionHeader("Google")
+        // MARK: Integrations
+        let integrationsHeader = Self.sectionHeader("Integrations")
         let googleClientIdField = NSTextField()
         googleClientIdField.placeholderString = "YOUR_CLIENT_ID.apps.googleusercontent.com"
         googleClientIdField.stringValue = UserDefaults.standard.string(forKey: GoogleConfig.clientIdDefaultsKey) ?? ""
@@ -101,7 +117,7 @@ final class SettingsWindow: NSObject {
         googleClientIdField.widthAnchor.constraint(equalToConstant: 400).isActive = true
         self.googleClientIdField = googleClientIdField
 
-        let googleHint = NSTextField(labelWithString: "OAuth 2.0 Client ID from Google Cloud Console (Desktop app type). Required for Gmail sign-in.")
+        let googleHint = NSTextField(labelWithString: "Google OAuth 2.0 Client ID (Desktop app type). Required for Gmail sign-in.")
         googleHint.font = .systemFont(ofSize: 11)
         googleHint.textColor = .secondaryLabelColor
         googleHint.lineBreakMode = .byWordWrapping
@@ -110,22 +126,26 @@ final class SettingsWindow: NSObject {
         let saveGoogleButton = CursorButton(title: "Save Client ID", target: self, action: #selector(saveGoogleClientId))
         saveGoogleButton.bezelStyle = .rounded
 
-        // About
+        // MARK: About
         let aboutHeader = Self.sectionHeader("About")
         let versionLabel = NSTextField(labelWithString: "LiteMail v0.2.0 — Multi-account IMAP/JMAP")
         versionLabel.font = .systemFont(ofSize: 11)
         versionLabel.textColor = .tertiaryLabelColor
 
+        let countLabel = NSTextField(labelWithString: "Total emails stored: \(emailCount)")
+        countLabel.font = .systemFont(ofSize: 11)
+        countLabel.textColor = .tertiaryLabelColor
+
         let stack = NSStackView(views: [
             accountHeader, scrollView, accountButtons,
             Self.spacer(),
-            statsHeader, countLabel, syncButton,
+            appearanceHeader, limitRow,
             Self.spacer(),
-            sigHeader, sigField, saveSigButton,
+            composingHeader, sigField, saveSigButton,
             Self.spacer(),
-            googleHeader, googleClientIdField, googleHint, saveGoogleButton,
+            integrationsHeader, googleClientIdField, googleHint, saveGoogleButton,
             Self.spacer(),
-            aboutHeader, versionLabel,
+            aboutHeader, versionLabel, countLabel,
         ])
         stack.orientation = .vertical
         stack.alignment = .leading
@@ -168,6 +188,12 @@ final class SettingsWindow: NSObject {
 
     @objc private func syncClicked() {
         onSyncNow?()
+    }
+
+    @objc private func emailListLimitChanged(_ sender: NSPopUpButton) {
+        let selected = sender.selectedTag()
+        guard DisplayPreferences.emailListLimitPresets.contains(selected) else { return }
+        DisplayPreferences.emailListLimit = selected
     }
 
     @objc private func saveSignature() {

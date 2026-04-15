@@ -14,7 +14,8 @@ protocol MailEngineProtocol: Sendable {
     // MARK: - Sync
 
     func performInitialSync(accountId: String) async throws
-    func performIncrementalSync(accountId: String) async throws
+    @discardableResult
+    func performIncrementalSync(accountId: String) async throws -> Bool
     func syncAllAccounts() async throws
 
     // MARK: - Search (cross-account)

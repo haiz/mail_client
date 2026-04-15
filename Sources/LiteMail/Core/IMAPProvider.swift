@@ -83,32 +83,48 @@ actor IMAPProvider: MailProvider {
     // MARK: - Sync
 
     func performInitialSync() async throws {
-        var imap = try await getIMAP()
-        let folders = try await listFolders()
+        var imap: IMAPServer
+        var folders: [ProviderFolder]
+        do {
+            imap = try await getIMAP()
+            folders = try await listFolders()
+        } catch {
+            // Stale/dropped connection — clear it and retry once.
+            imapServer = nil
+            imap = try await getIMAP()
+            folders = try await listFolders()
+        }
 
         for folder in folders where !Self.isSkippedFolder(folder.id) {
             do {
                 try await syncFolder(imap: imap, folderId: folder.id)
             } catch {
-                // If the connection died mid-sync (e.g. server dropped it and SwiftMail's
-                // internal PLAIN re-auth failed), clear imapServer so the next call to
-                // getIMAP() reconnects via connect() which has the PLAIN→LOGIN fallback.
+                // If the connection died mid-sync, clear stale connection
+                // and reconnect for remaining folders.
                 imapServer = nil
-                // Reconnect so subsequent folders can still be synced.
                 imap = try await getIMAP()
             }
         }
     }
 
     func performIncrementalSync() async throws {
-        var imap = try await getIMAP()
-        let folders = try await listFolders()
+        var imap: IMAPServer
+        var folders: [ProviderFolder]
+        do {
+            imap = try await getIMAP()
+            folders = try await listFolders()
+        } catch {
+            // Stale/dropped connection — clear it and retry once.
+            imapServer = nil
+            imap = try await getIMAP()
+            folders = try await listFolders()
+        }
 
         for folder in folders where !Self.isSkippedFolder(folder.id) {
             do {
                 try await incrementalSyncFolder(imap: imap, folderId: folder.id)
             } catch {
-                // Same as above: clear stale connection on any per-folder failure,
+                // Clear stale connection on any per-folder failure,
                 // then reconnect for remaining folders.
                 imapServer = nil
                 imap = try await getIMAP()
@@ -182,6 +198,15 @@ actor IMAPProvider: MailProvider {
 
         if let storedValidity = syncState.uidValidity,
            storedValidity != Int(selection.uidValidity.value) {
+            try await syncFolder(imap: imap, folderId: folderId)
+            return
+        }
+
+        // Detect local/server count drift (e.g. after a prior failed delete
+        // removed rows locally but server still has the messages).
+        let serverCount = selection.messageCount
+        let localCount = (try? await store.folderEmailCount(accountId: accountId, folder: folderId)) ?? 0
+        if serverCount > 0 && localCount < serverCount / 2 {
             try await syncFolder(imap: imap, folderId: folderId)
             return
         }
@@ -413,9 +438,29 @@ actor IMAPProvider: MailProvider {
         for (folder, uids) in Self.groupRefsByFolder(messageRefs) {
             if let folder { _ = try await imap.selectMailbox(folder) }
             let uidSet = MessageIdentifierSet<UID>(uids)
-            try await imap.store(flags: [.deleted], on: uidSet, operation: .add)
-            try await imap.expunge()
+
+            if isGmail && !Self.isGmailTrashFolder(folder) {
+                // Gmail IMAP: STORE \Deleted + EXPUNGE on a label folder only
+                // removes the label — it does not delete the message.
+                // Move to Trash instead; only EXPUNGE inside Trash truly deletes.
+                try await imap.moveToTrash(messages: uidSet)
+            } else {
+                try await imap.store(flags: [.deleted], on: uidSet, operation: .add)
+                try await imap.expunge()
+            }
         }
+    }
+
+    /// Whether this account connects to Gmail / Google Mail.
+    private var isGmail: Bool {
+        guard let host = config.imapHost else { return false }
+        let h = host.lowercased()
+        return h.contains("gmail.com") || h.contains("googlemail.com")
+    }
+
+    private static func isGmailTrashFolder(_ folder: String?) -> Bool {
+        guard let f = folder else { return false }
+        return f == "[Gmail]/Trash" || f == "[Google Mail]/Trash"
     }
 
     /// Group messageRefs by folder for batch IMAP operations.

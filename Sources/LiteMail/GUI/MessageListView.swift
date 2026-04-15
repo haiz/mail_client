@@ -53,6 +53,20 @@ final class MessageListView: NSObject {
     var onMessageSelected: ((EmailHeader) -> Void)?
     var onSearchChanged: ((String) -> Void)?
     var onCheckedIdsChanged: ((Set<Int64>) -> Void)?
+    /// Fired when the user scrolls near the bottom and more emails should be loaded.
+    /// Guarded internally against re-firing while a previous request is in flight.
+    var onRequestLoadMore: (() -> Void)?
+
+    /// Tracks whether a load-more request is currently in flight. Prevents duplicate
+    /// fires from trackpad momentum scrolling, which produces many bounds-changed
+    /// notifications in rapid succession.
+    private var isLoadingMore = false
+    /// Whether more pages are available. Set to false when the last page returned
+    /// fewer rows than the requested limit, or when in search mode.
+    private var canLoadMore = false
+    /// Distance from the bottom (in points) at which a load-more is triggered.
+    /// ~6 rows of 64pt gives the fetch time to land before the user hits the end.
+    private static let loadMoreThreshold: CGFloat = 400
 
     /// The name of the currently displayed folder, used for the empty state subtitle.
     var currentFolderName: String = "Inbox" {
@@ -142,7 +156,33 @@ final class MessageListView: NSObject {
         searchField.target = self
         searchField.action = #selector(searchFieldChanged)
 
+        // Infinite scroll: listen for scroll events so we can fire onRequestLoadMore
+        // when the user reaches the bottom. contentView.postsBoundsChangedNotifications
+        // must be explicitly enabled — NSClipView does not post by default.
+        scrollView.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(scrollViewDidScroll),
+            name: NSView.boundsDidChangeNotification,
+            object: scrollView.contentView
+        )
+
         setupEmptyState(in: container)
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    @objc private func scrollViewDidScroll() {
+        guard !isLoadingMore, canLoadMore, !threadGroups.isEmpty else { return }
+        let visible = scrollView.contentView.documentVisibleRect
+        let documentHeight = tableView.bounds.height
+        // Trigger when the bottom of the visible region is within threshold of the
+        // bottom of the document. visible.maxY == documentHeight when fully scrolled.
+        guard visible.maxY >= documentHeight - Self.loadMoreThreshold else { return }
+        isLoadingMore = true
+        onRequestLoadMore?()
     }
 
     private func setupEmptyState(in container: NSView) {
@@ -187,6 +227,8 @@ final class MessageListView: NSObject {
         let previouslySelectedId = selectedHeader?.id
         self.messages = messages
         self.threadGroups = Self.groupByThread(messages)
+        // Fresh page — any in-flight load-more no longer applies.
+        isLoadingMore = false
         tableView.reloadData()
         updateEmptyState()
 
@@ -197,6 +239,38 @@ final class MessageListView: NSObject {
             tableView.scrollRowToVisible(idx)
         } else if !threadGroups.isEmpty {
             tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        }
+    }
+
+    /// Append additional pages without disturbing the user's scroll position or
+    /// selection. Used by infinite-scroll pagination.
+    func append(messages newMessages: [EmailHeader]) {
+        isLoadingMore = false
+        guard !newMessages.isEmpty else { return }
+
+        let previouslySelectedId = selectedHeader?.id
+        let scrollOrigin = scrollView.contentView.bounds.origin
+
+        self.messages.append(contentsOf: newMessages)
+        self.threadGroups = Self.groupByThread(self.messages)
+        tableView.reloadData()
+        updateEmptyState()
+
+        // Restore selection without triggering scrollRowToVisible — the user is
+        // scrolling through the list; jumping to the old selected row would be jarring.
+        if let prevId = previouslySelectedId,
+           let idx = threadGroups.firstIndex(where: { $0.primaryHeader.id == prevId }) {
+            tableView.selectRowIndexes(IndexSet(integer: idx), byExtendingSelection: false)
+        }
+        scrollView.contentView.setBoundsOrigin(scrollOrigin)
+    }
+
+    /// Enable/disable infinite-scroll pagination. AppDelegate turns this off in
+    /// search mode and after the last page returns fewer rows than the limit.
+    func setCanLoadMore(_ value: Bool) {
+        canLoadMore = value
+        if !value {
+            isLoadingMore = false
         }
     }
 
