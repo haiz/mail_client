@@ -16,3 +16,6 @@ DerivedData/
 
 # Planning/design docs from superpowers skills — local working artifacts
 docs/superpowers/
+
+# Icon build artifacts
+build/
