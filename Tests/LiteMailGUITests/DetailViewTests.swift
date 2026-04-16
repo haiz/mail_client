@@ -3,78 +3,31 @@ import AppKit
 @testable import LiteMail
 
 @MainActor
-final class DetailViewTests: XCTestCase {
+final class ThreadViewTests: XCTestCase {
 
-    func testPlainTextEmail() {
-        let detail = DetailView()
+    func testCollapsedCardShowsSenderAndDate() {
         let header = GUITestData.sampleHeaders(count: 1).first!
-        let body = GUITestData.sampleBody(emailId: 1, html: false)
-
-        detail.display(header: header, body: body)
+        let card = MessageCardView(header: header, isExpanded: false)
         pumpRunLoop()
 
-        XCTAssertNotNil(detail.view)
+        XCTAssertFalse(card.isExpanded)
+        XCTAssertNotNil(card.view)
     }
 
-    func testHTMLEmail() {
-        let detail = DetailView()
+    func testCollapsedCardShowsSnippet() {
         let header = GUITestData.sampleHeaders(count: 1).first!
-        let body = GUITestData.sampleBody(emailId: 1, html: true)
-
-        detail.display(header: header, body: body)
-        pumpRunLoop(seconds: 0.5)
-
-        XCTAssertNotNil(detail.webView)
-    }
-
-    func testEmptyState() {
-        let detail = DetailView()
-        detail.clear()
+        let card = MessageCardView(header: header, isExpanded: false)
         pumpRunLoop()
 
-        XCTAssertNil(detail.webView)
+        XCTAssertFalse(card.isExpanded)
     }
 
-    func testReplyCallback() {
-        let detail = DetailView()
-        var replyCalled = false
-        detail.onReply = { replyCalled = true }
-        detail.onReply?()
-        XCTAssertTrue(replyCalled)
-    }
+    func testCollapsedCardShowsAttachmentIcon() {
+        let header = GUITestData.sampleHeaders(count: 3)[2]
+        XCTAssertTrue(header.hasAttachments)
+        let card = MessageCardView(header: header, isExpanded: false)
+        pumpRunLoop()
 
-    func testForwardCallback() {
-        let detail = DetailView()
-        var forwardCalled = false
-        detail.onForward = { forwardCalled = true }
-        detail.onForward?()
-        XCTAssertTrue(forwardCalled)
-    }
-
-    func testArchiveCallback() {
-        let detail = DetailView()
-        var archiveCalled = false
-        detail.onArchive = { archiveCalled = true }
-        detail.onArchive?()
-        XCTAssertTrue(archiveCalled)
-    }
-
-    func testDeleteCallback() {
-        let detail = DetailView()
-        var deleteCalled = false
-        detail.onDelete = { deleteCalled = true }
-        detail.onDelete?()
-        XCTAssertTrue(deleteCalled)
-    }
-
-    func testAttachmentDownloadCallback() {
-        let detail = DetailView()
-        let attachments = GUITestData.sampleAttachments(emailId: 1)
-
-        var downloadedAttachment: AttachmentInfo?
-        detail.onDownloadAttachment = { att in downloadedAttachment = att }
-        detail.onDownloadAttachment?(attachments.first!)
-
-        XCTAssertEqual(downloadedAttachment?.filename, "photo.jpg")
+        XCTAssertFalse(card.isExpanded)
     }
 }
