@@ -93,10 +93,19 @@ final class CommandPalette: NSObject {
         tableView.delegate = self
         searchField.delegate = self
 
-        // Position relative to parent
+        // Position relative to parent, clamped to screen bounds
         if let parentFrame = parentWindow.contentView?.window?.frame {
-            let x = parentFrame.midX - 240
-            let y = parentFrame.midY + 50
+            var x = parentFrame.midX - 240
+            var y = parentFrame.midY + 50
+
+            if let screen = parentWindow.screen ?? NSScreen.main {
+                let visibleFrame = screen.visibleFrame
+                let panelWidth: CGFloat = 480
+                let panelHeight: CGFloat = 300
+                x = max(visibleFrame.minX, min(x, visibleFrame.maxX - panelWidth))
+                y = max(visibleFrame.minY, min(y, visibleFrame.maxY - panelHeight))
+            }
+
             panel.setFrameOrigin(NSPoint(x: x, y: y))
         }
 
