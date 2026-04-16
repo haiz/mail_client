@@ -370,7 +370,7 @@ actor JMAPProvider: MailProvider {
         let isRead = email.keywords["$seen"] ?? false
         let isStarred = email.keywords["$flagged"] ?? false
 
-        return EmailRecord(
+        var record = EmailRecord(
             messageId: email.id,
             threadId: email.threadId,
             folder: folder,
@@ -385,6 +385,8 @@ actor JMAPProvider: MailProvider {
             hasAttachments: email.hasAttachment,
             accountId: accountId
         )
+        record.snippet = email.preview
+        return record
     }
 
     static func toProviderMessage(_ email: JMAPEmail) -> ProviderMessage {

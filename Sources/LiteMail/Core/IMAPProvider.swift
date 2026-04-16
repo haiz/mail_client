@@ -652,6 +652,11 @@ actor IMAPProvider: MailProvider {
             if let messageIdStr = info.messageId?.description,
                let id = try await store.findEmailId(byMessageId: messageIdStr, accountId: accountId) {
                 try await store.insertBody(emailId: id, text: message.textBody, html: message.htmlBody)
+                // Backfill snippet from body text
+                if let text = message.textBody ?? message.htmlBody {
+                    let snippet = String(text.prefix(150)).replacingOccurrences(of: "\n", with: " ")
+                    try? await store.updateSnippet(emailId: id, snippet: snippet)
+                }
             }
         } catch {
             // Non-fatal

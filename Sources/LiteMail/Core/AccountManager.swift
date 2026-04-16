@@ -495,7 +495,7 @@ actor AccountManager: MailEngineProtocol {
             isRead: r.isRead,
             isStarred: r.isStarred,
             hasAttachments: r.hasAttachments,
-            snippet: nil,
+            snippet: r.snippet,
             deleteState: r.deleteState
         )
     }
