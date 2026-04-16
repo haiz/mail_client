@@ -24,6 +24,7 @@ final class MessageCardView: NSObject {
     let view: NSView
     private let header: EmailHeader
     private(set) var isExpanded: Bool
+    private let accountEmail: String?
 
     /// The email ID this card displays.
     var emailId: Int64 { header.id }
@@ -86,9 +87,10 @@ final class MessageCardView: NSObject {
         NSColor(red: 0.27, green: 0.71, blue: 0.73, alpha: 1),
     ]
 
-    init(header: EmailHeader, isExpanded: Bool) {
+    init(header: EmailHeader, isExpanded: Bool, accountEmail: String? = nil) {
         self.header = header
         self.isExpanded = isExpanded
+        self.accountEmail = accountEmail
 
         view = MessageCardContainerView()
         view.wantsLayer = true
@@ -361,7 +363,11 @@ final class MessageCardView: NSObject {
         expAvatarCircle.layer?.backgroundColor = color.cgColor
         expSenderLabel.stringValue = displayName
         expDateLabel.stringValue = Self.relativeDate(header.date)
-        expRecipientLabel.stringValue = "to me"
+        if let accountEmail, header.senderEmail.lowercased() == accountEmail.lowercased() {
+            expRecipientLabel.stringValue = "to recipients"
+        } else {
+            expRecipientLabel.stringValue = "to me"
+        }
     }
 
     // MARK: - Expand / Collapse

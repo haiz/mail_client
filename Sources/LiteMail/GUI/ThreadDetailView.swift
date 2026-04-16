@@ -33,6 +33,9 @@ final class ThreadDetailView: NSObject {
     var onDownloadAttachment: ((Int64, AttachmentInfo) -> Void)?
     var onFetchBody: ((Int64) -> Void)?
 
+    /// The current account's email, used for "to me" vs "to recipients" display.
+    var accountEmail: String?
+
     /// Available folders for the Move menu. Set by AppDelegate.
     var availableFolders: [MailFolder] = [] {
         didSet { cards.forEach { $0.availableFolders = availableFolders } }
@@ -206,7 +209,7 @@ final class ThreadDetailView: NSObject {
         let lastIndex = headers.count - 1
         for (index, header) in headers.enumerated() {
             let shouldExpand = index == lastIndex || !header.isRead
-            let card = MessageCardView(header: header, isExpanded: shouldExpand)
+            let card = MessageCardView(header: header, isExpanded: shouldExpand, accountEmail: accountEmail)
 
             card.onToggleExpand = { [weak self, weak card] in
                 guard let card else { return }
