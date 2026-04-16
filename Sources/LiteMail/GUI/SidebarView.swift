@@ -639,6 +639,9 @@ private final class AccountSwitcherView: NSView {
             textContainer.topAnchor.constraint(equalTo: topAnchor),
             textContainer.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
+
+        setAccessibilityRole(.popUpButton)
+        setAccessibilityLabel("Account")
     }
 
     override func updateLayer() {
@@ -680,6 +683,7 @@ private final class AccountSwitcherView: NSView {
 
         avatarColor = Self.avatarColors[abs(email.hashValue) % Self.avatarColors.count]
         avatarCircle.layer?.backgroundColor = avatarColor.cgColor
+        setAccessibilityValue(email)
         needsDisplay = true
     }
 
@@ -725,7 +729,10 @@ private final class AccountSwitcherView: NSView {
         let inside = bounds.contains(convert(event.locationInWindow, from: nil))
         isHovered = inside
         needsDisplay = true
-        if inside { onTap?() }
+        if inside {
+            onTap?()
+            NSAccessibility.post(element: self, notification: .valueChanged)
+        }
     }
 }
 
