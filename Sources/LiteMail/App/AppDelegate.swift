@@ -60,9 +60,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let headers = wc.messageListView.threadGroups
                     .filter { checkedIds.contains($0.primaryHeader.id) }
                     .map(\.primaryHeader)
-                wc.detailView.showBulkSummary(headers: headers)
+                wc.threadDetailView.showBulkSummary(headers: headers)
             } else {
-                wc.detailView.hideBulkSummary()
+                wc.threadDetailView.hideBulkSummary()
             }
         }
         wc.sidebarView.onAccountSwitched = { [weak self] accountId in
@@ -273,70 +273,81 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func loadMessageDetail(header: EmailHeader) {
         guard let accountManager else { return }
 
-        // Skip if already displaying this email (e.g. re-triggered by reloadData
-        // after markRead — reloadData clears selection to nil then restores it,
-        // which fires tableViewSelectionDidChange again for the same email).
         guard header.id != displayedEmailId else { return }
         displayedEmailId = header.id
 
-        // Show header immediately — body loads async below.
-        windowController?.detailView.display(header: header, body: nil, isLoading: true)
-
-        // Wire action buttons that don't need the body.
-        windowController?.detailView.onArchive = { [weak self] in
-            self?.handleAction(.archive(header.id))
-        }
-        windowController?.detailView.onDelete = { [weak self] in
-            self?.handleAction(.delete(header.id))
-        }
-        windowController?.detailView.onMove = { [weak self] folderId in
-            self?.handleAction(.moveToFolder(header.id, folderId))
-        }
-
-        // Fetch body, then mark as read AFTER.
-        // IMAP is a stateful single-connection protocol — concurrent provider
-        // calls (markRead + fetchBody) race on the socket and the body fetch
-        // fails silently. Keeping the original order (body first, markRead second)
-        // avoids the collision.
         Task { @MainActor in
             do {
-                let body = try await accountManager.fetchBody(emailId: header.id)
-                windowController?.detailView.display(header: header, body: body)
-
-                // Wire reply/forward (need body for compose window).
-                windowController?.detailView.onReply = { [weak self] in
-                    self?.openComposer(mode: .reply(to: header, body: body))
-                }
-                windowController?.detailView.onForward = { [weak self] in
-                    self?.openComposer(mode: .forward(original: header, body: body))
+                let threadHeaders: [EmailHeader]
+                if let threadId = header.threadId {
+                    threadHeaders = try await accountManager.fetchThread(threadId: threadId)
+                } else {
+                    threadHeaders = [header]
                 }
 
-                // Populate available folders for the Move menu
+                let subject = header.subject ?? "(no subject)"
+                windowController?.threadDetailView.display(thread: threadHeaders, subject: subject)
+
+                // Populate available folders for Move menu
                 if let accountId = self.currentAccountId,
                    let folders = try? await accountManager.listFolders(accountId: accountId) {
-                    windowController?.detailView.availableFolders = folders.filter { $0.id != header.folder }
+                    windowController?.threadDetailView.availableFolders = folders.filter { $0.id != header.folder }
                 }
 
-                // Load and display attachments
-                if header.hasAttachments {
-                    let attachments = try await accountManager.listAttachments(emailId: header.id)
-                    windowController?.detailView.displayAttachments(attachments)
-                    windowController?.detailView.onDownloadAttachment = { [weak self] att in
-                        self?.downloadAttachment(emailId: header.id, attachment: att)
-                    }
-                } else {
-                    windowController?.detailView.displayAttachments([])
+                // Wire callbacks
+                windowController?.threadDetailView.onReply = { [weak self] h, b in
+                    self?.openComposer(mode: .reply(to: h, body: b))
+                }
+                windowController?.threadDetailView.onForward = { [weak self] h, b in
+                    self?.openComposer(mode: .forward(original: h, body: b))
+                }
+                windowController?.threadDetailView.onArchive = { [weak self] id in
+                    self?.handleAction(.archive(id))
+                }
+                windowController?.threadDetailView.onDelete = { [weak self] id in
+                    self?.handleAction(.delete(id))
+                }
+                windowController?.threadDetailView.onMove = { [weak self] id, folderId in
+                    self?.handleAction(.moveToFolder(id, folderId))
+                }
+                windowController?.threadDetailView.onDownloadAttachment = { [weak self] emailId, att in
+                    self?.downloadAttachment(emailId: emailId, attachment: att)
                 }
 
-                // Mark as read after body is displayed (fire-and-forget).
-                if !header.isRead {
-                    Task { @MainActor [weak self] in
-                        try? await accountManager.markRead(emailId: header.id, read: true)
-                        self?.loadMessages()
+                // Body fetch callback — loads body on demand when cards expand
+                windowController?.threadDetailView.onFetchBody = { [weak self] emailId in
+                    guard let self, let accountManager = self.accountManager else { return }
+                    Task { @MainActor in
+                        do {
+                            let body = try await accountManager.fetchBody(emailId: emailId)
+                            var attachments: [AttachmentInfo] = []
+                            if let h = threadHeaders.first(where: { $0.id == emailId }), h.hasAttachments {
+                                attachments = try await accountManager.listAttachments(emailId: emailId)
+                            }
+                            self.windowController?.threadDetailView.deliverBody(body, forEmailId: emailId, attachments: attachments)
+
+                            // Backfill snippet if missing
+                            if let h = threadHeaders.first(where: { $0.id == emailId }), h.snippet == nil,
+                               let text = body?.textBody ?? body?.htmlBody {
+                                let snippet = String(text.prefix(150)).replacingOccurrences(of: "\n", with: " ")
+                                try? await accountManager.store.updateSnippet(emailId: emailId, snippet: snippet)
+                            }
+                        } catch {
+                            // Non-fatal: card will show "Loading..." until retry
+                        }
                     }
                 }
+
+                // Mark unread emails as read
+                for h in threadHeaders where !h.isRead {
+                    Task { @MainActor in
+                        try? await accountManager.markRead(emailId: h.id, read: true)
+                    }
+                }
+                loadMessages()
+
             } catch {
-                showError("Failed to load message: \(error.localizedDescription)")
+                showError("Failed to load thread: \(error.localizedDescription)")
             }
         }
     }
@@ -621,7 +632,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func composeNewMessage() { openComposer(mode: .compose) }
 
     @objc private func printEmail() {
-        windowController?.detailView.printEmail()
+        // Print not yet supported in thread view
     }
 
     @objc private func exportEml() {

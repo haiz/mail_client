@@ -8,7 +8,7 @@ final class MainWindowController: NSObject {
     private let splitView: NSSplitView
     let sidebarView: SidebarView
     let messageListView: MessageListView
-    let detailView: DetailView
+    let threadDetailView: ThreadDetailView
     let statusBar: StatusBar
     let undoToastView = UndoToastView()
     private var commandPalette: CommandPalette?
@@ -45,7 +45,7 @@ final class MainWindowController: NSObject {
         // Subviews
         sidebarView = SidebarView()
         messageListView = MessageListView()
-        detailView = DetailView()
+        threadDetailView = ThreadDetailView()
         statusBar = StatusBar()
 
         super.init()
@@ -72,7 +72,7 @@ final class MainWindowController: NSObject {
         // Assemble split view
         splitView.addArrangedSubview(sidebarView.view)
         splitView.addArrangedSubview(messageColumn)
-        splitView.addArrangedSubview(detailView.view)
+        splitView.addArrangedSubview(threadDetailView.view)
 
         splitView.setHoldingPriority(.defaultHigh, forSubviewAt: 0)
         splitView.setHoldingPriority(.defaultLow + 1, forSubviewAt: 1)
@@ -267,7 +267,7 @@ final class MainWindowController: NSObject {
 
         // Escape → clear detail view
         if event.keyCode == 53 { // Escape
-            detailView.clear()
+            threadDetailView.clear()
             return nil
         }
 

@@ -1,5 +1,4 @@
 import AppKit
-import WebKit
 import GRDB
 
 /// Captures screenshots of all app screens and emails for automated UI review.
@@ -8,7 +7,6 @@ final class UIReviewRunner: NSObject {
     private let outputDir: String
     private var manifest: UIReviewManifest
     private var windowController: MainWindowController?
-    private var webViewFinishedLoading = false
 
     init(outputDir: String) {
         self.outputDir = outputDir
@@ -72,7 +70,7 @@ final class UIReviewRunner: NSObject {
         )
         RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.3))
 
-        captureView(wc.detailView.view, filename: "01_detail_empty.png", entry: .init(
+        captureView(wc.threadDetailView.view, filename: "01_detail_empty.png", entry: .init(
             file: "01_detail_empty.png", type: "screen", name: "Detail empty state"
         ))
 
@@ -138,40 +136,25 @@ final class UIReviewRunner: NSObject {
 
                 let hasHTML = body?.htmlBody.map { !$0.isEmpty } ?? false
 
-                // Must dispatch to main thread for UI updates
-                // Set navigation delegate in the same MainActor block so it's
-                // registered before the RunLoop processes any WebView events.
-                if hasHTML { webViewFinishedLoading = false }
+                // Display as a single-message thread, then deliver the body
                 await MainActor.run {
-                    wc.detailView.display(header: header, body: body)
-                    if hasHTML, let wv = wc.detailView.webView {
-                        wv.navigationDelegate = self
-                    }
+                    let subject = header.subject ?? "(no subject)"
+                    wc.threadDetailView.display(thread: [header], subject: subject)
+                    let emailId = record.id ?? 0
+                    wc.threadDetailView.deliverBody(body, forEmailId: emailId)
                 }
 
-                if hasHTML {
-                    // Wait for didFinish/didFail or timeout (5 seconds)
-                    let deadline = Date(timeIntervalSinceNow: 5.0)
-                    while !webViewFinishedLoading && Date() < deadline {
-                        await MainActor.run {
-                            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))
-                        }
-                    }
-                    // Extra 0.3s for final paint
-                    await MainActor.run {
-                        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.3))
-                    }
-                } else {
-                    await MainActor.run {
-                        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.3))
-                    }
+                // Allow time for layout and any WebView rendering inside cards
+                let delay = hasHTML ? 2.0 : 0.3
+                await MainActor.run {
+                    RunLoop.current.run(until: Date(timeIntervalSinceNow: delay))
                 }
 
                 let sanitizedSubject = Self.sanitizeFilename(header.subject ?? "no_subject")
                 let filename = String(format: "email_%03d_%@.png", emailIndex, sanitizedSubject)
 
                 await MainActor.run {
-                    captureView(wc.detailView.view, filename: filename, entry: .init(
+                    captureView(wc.threadDetailView.view, filename: filename, entry: .init(
                         file: filename,
                         type: "email",
                         name: header.subject ?? "(no subject)",
@@ -296,19 +279,6 @@ struct UIReviewManifest: Codable {
     struct WindowSize: Codable {
         let width: Int
         let height: Int
-    }
-}
-
-// MARK: - WKNavigationDelegate
-
-extension UIReviewRunner: WKNavigationDelegate {
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        webViewFinishedLoading = true
-    }
-
-    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        print("WebView failed to load: \(error.localizedDescription)")
-        webViewFinishedLoading = true
     }
 }
 
