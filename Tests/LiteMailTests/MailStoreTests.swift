@@ -517,6 +517,65 @@ final class MailStoreTests: XCTestCase {
         XCTAssertEqual(inbox.count, 2)
     }
 
+    func testGmailCategoryCountsReturnsAllSixEntries() async throws {
+        let counts = try await store.gmailCategoryCounts(accountId: testAccountId)
+        XCTAssertEqual(Set(counts.keys), Set(GmailCategory.allCases.map { $0.rawValue }))
+    }
+
+    func testGmailCategoryCountsTotalsAndUnread() async throws {
+        // 2 promotions (1 unread), 1 social (read), 1 NULL (unread → counts as Personal)
+        var p1 = makeEmail(messageId: "<p1@x>", uid: 500, gmailCategory: "promotions")
+        p1.isRead = false
+        var p2 = makeEmail(messageId: "<p2@x>", uid: 501, gmailCategory: "promotions")
+        p2.isRead = true
+        var s1 = makeEmail(messageId: "<s1@x>", uid: 502, gmailCategory: "social")
+        s1.isRead = true
+        let n1 = makeEmail(messageId: "<n1@x>", uid: 503)  // gmail_category=nil, isRead=false
+        _ = try await store.insertEmail(p1)
+        _ = try await store.insertEmail(p2)
+        _ = try await store.insertEmail(s1)
+        _ = try await store.insertEmail(n1)
+
+        let counts = try await store.gmailCategoryCounts(accountId: testAccountId)
+        XCTAssertEqual(counts["promotions"]?.total, 2)
+        XCTAssertEqual(counts["promotions"]?.unread, 1)
+        XCTAssertEqual(counts["social"]?.total, 1)
+        XCTAssertEqual(counts["social"]?.unread, 0)
+        XCTAssertEqual(counts["personal"]?.total, 1, "NULL gmail_category counts as personal")
+        XCTAssertEqual(counts["personal"]?.unread, 1)
+        XCTAssertEqual(counts["updates"]?.total, 0)
+        XCTAssertEqual(counts["forums"]?.total, 0)
+        XCTAssertEqual(counts["purchases"]?.total, 0)
+    }
+
+    func testGmailCategoryCountsExcludesNonInbox() async throws {
+        let trashed = makeEmail(
+            messageId: "<trash-promo@x>",
+            folder: "[Gmail]/Trash",
+            uid: 600,
+            gmailCategory: "promotions"
+        )
+        _ = try await store.insertEmail(trashed)
+
+        let counts = try await store.gmailCategoryCounts(accountId: testAccountId)
+        XCTAssertEqual(counts["promotions"]?.total, 0)
+    }
+
+    func testGmailCategoryCountsExcludesPendingDelete() async throws {
+        // pending_delete rows must not contribute to category totals/unread.
+        let email = makeEmail(messageId: "<pd@x>", uid: 700, gmailCategory: "promotions")
+        let id = try await store.insertEmail(email)
+
+        // Use the existing public delete pipeline. enqueueDeletes flips delete_state
+        // to 'pending_delete' for the matched rows.
+        let records = try await store.fetchEmailRecords(ids: [id])
+        try await store.enqueueDeletes(records: records)
+
+        let counts = try await store.gmailCategoryCounts(accountId: testAccountId)
+        XCTAssertEqual(counts["promotions"]?.total, 0, "pending_delete row must be excluded")
+        XCTAssertEqual(counts["promotions"]?.unread, 0)
+    }
+
     // MARK: - Helpers
 
     private func makeEmail(

@@ -846,6 +846,39 @@ actor MailStore {
         }
     }
 
+    /// Returns total + unread counts per Gmail category for INBOX of the given account.
+    /// All 6 categories are always present in the dictionary, possibly with zero counts.
+    /// NULL `gmail_category` is bucketed as `personal` (matches Primary tab semantics).
+    func gmailCategoryCounts(accountId: String) throws -> [String: (total: Int, unread: Int)] {
+        try dbPool.read { db in
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT
+                    COALESCE(gmail_category, 'personal') AS category,
+                    COUNT(*) AS total,
+                    COALESCE(SUM(CASE WHEN is_read = 0 THEN 1 ELSE 0 END), 0) AS unread
+                FROM emails
+                WHERE account_id = ?
+                  AND folder = 'INBOX'
+                  AND is_deleted = 0
+                  AND delete_state <> 'pending_delete'
+                GROUP BY COALESCE(gmail_category, 'personal')
+            """, arguments: [accountId])
+
+            var result: [String: (total: Int, unread: Int)] = [:]
+            for c in GmailCategory.allCases {
+                result[c.rawValue] = (total: 0, unread: 0)
+            }
+            for row in rows {
+                let cat: String = row["category"]
+                // Defensively skip rows whose category isn't in the known set
+                // (e.g. legacy or corrupt data) — they don't fit any virtual folder.
+                guard GmailCategory(rawValue: cat) != nil else { continue }
+                result[cat] = (total: row["total"], unread: row["unread"])
+            }
+            return result
+        }
+    }
+
     // MARK: - Sync State
 
     func getSyncState(accountId: String, folder: String) throws -> SyncStateRecord? {
