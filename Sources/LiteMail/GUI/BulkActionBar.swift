@@ -13,11 +13,11 @@ final class BulkActionBar: NSView {
     private let topBorder = NSBox()
 
     // Action buttons
-    private let archiveButton: NSButton
-    private let deleteButton: NSButton
-    private let markReadButton: NSButton
-    private let starButton: NSButton
-    private let moveButton: NSButton
+    private let archiveButton: CursorButton
+    private let deleteButton: CursorButton
+    private let markReadButton: CursorButton
+    private let starButton: CursorButton
+    private let moveButton: CursorButton
 
     // MARK: - Callbacks
 
@@ -54,10 +54,10 @@ final class BulkActionBar: NSView {
         deselectButton.setContentHuggingPriority(.required, for: .horizontal)
 
         // Action buttons — SF Symbols, toolbar style matching DetailView
-        func makeButton(_ symbolName: String, _ description: String) -> NSButton {
+        func makeButton(_ symbolName: String, _ description: String) -> CursorButton {
             let img = NSImage(systemSymbolName: symbolName, accessibilityDescription: description)!
-            let btn = NSButton(image: img, target: nil, action: nil)
-            btn.bezelStyle = .toolbar
+            let btn = CursorButton(image: img, target: nil, action: nil)
+            btn.bezelStyle = .accessoryBarAction
             btn.isBordered = false
             btn.contentTintColor = .labelColor
             btn.translatesAutoresizingMaskIntoConstraints = false

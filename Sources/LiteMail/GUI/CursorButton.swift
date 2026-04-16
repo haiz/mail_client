@@ -24,6 +24,11 @@ final class CursorButton: NSButton {
     /// True → system calls updateLayer() instead of draw(); implies wantsLayer.
     override var wantsUpdateLayer: Bool { true }
 
+    override var focusRingType: NSFocusRingType {
+        get { .exterior }
+        set { }
+    }
+
     // Install once the backing layer exists.
     private func installHoverBgIfNeeded() {
         guard !hoverBgInstalled, let layer = layer else { return }
