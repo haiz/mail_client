@@ -94,6 +94,21 @@ final class ThreadViewTests: XCTestCase {
                       "MessageCardContainerView must accept first responder for keyboard nav")
     }
 
+    func testExpandedCardHeaderContainerExists() {
+        let header = GUITestData.sampleHeaders(count: 1).first!
+        let card = MessageCardView(header: header, isExpanded: true)
+        pumpRunLoop()
+
+        let expandedContainer = card.view.subviews.first(where: { !$0.isHidden && $0.subviews.count > 3 })
+        XCTAssertNotNil(expandedContainer, "Expanded container should be visible")
+
+        let hasGestureOnContainer = expandedContainer?.subviews.contains(where: {
+            !$0.gestureRecognizers.isEmpty
+        }) ?? false
+        XCTAssertTrue(expandedContainer?.gestureRecognizers.isEmpty == false || hasGestureOnContainer,
+                      "Expanded header area should have a click gesture recognizer")
+    }
+
     func testWebViewHTMLContainsDarkModeCSS() {
         let header = GUITestData.sampleHeaders(count: 1).first!
         let card = MessageCardView(header: header, isExpanded: true)

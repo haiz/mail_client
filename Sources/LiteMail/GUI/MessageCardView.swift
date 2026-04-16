@@ -39,6 +39,7 @@ final class MessageCardView: NSObject {
 
     // Expanded state views
     private let expandedContainer = NSView()
+    private let headerContainer = NSView()
     private let expAvatarCircle = NSView()
     private let expAvatarLabel = NSTextField(labelWithString: "")
     private let expSenderLabel = NSTextField(labelWithString: "")
@@ -237,9 +238,17 @@ final class MessageCardView: NSObject {
     // MARK: - Expanded Layout
 
     private func setupExpandedLayout() {
-        let views: [NSView] = [expAvatarCircle, expAvatarLabel, expSenderLabel, expDateLabel,
-                               expRecipientLabel, headerSeparator, attachmentBar, bodyScrollView, actionBar]
-        for v in views {
+        // Header views go into headerContainer
+        let headerViews: [NSView] = [expAvatarCircle, expAvatarLabel, expSenderLabel, expDateLabel, expRecipientLabel]
+        for v in headerViews {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            headerContainer.addSubview(v)
+        }
+        headerContainer.translatesAutoresizingMaskIntoConstraints = false
+
+        // headerContainer + remaining views go into expandedContainer
+        let containerViews: [NSView] = [headerContainer, headerSeparator, attachmentBar, bodyScrollView, actionBar]
+        for v in containerViews {
             v.translatesAutoresizingMaskIntoConstraints = false
             expandedContainer.addSubview(v)
         }
@@ -270,11 +279,9 @@ final class MessageCardView: NSObject {
         actionBar.addArrangedSubview(moreButton)
         actionBar.spacing = 4
 
-        // Click gesture on expanded header area (avatar + sender + date)
+        // Single click gesture on the entire header container
         let headerClick = NSClickGestureRecognizer(target: self, action: #selector(cardClicked))
-        expAvatarCircle.addGestureRecognizer(headerClick)
-        let senderClick = NSClickGestureRecognizer(target: self, action: #selector(cardClicked))
-        expSenderLabel.addGestureRecognizer(senderClick)
+        headerContainer.addGestureRecognizer(headerClick)
 
         let expDisplayName = header.senderName ?? header.senderEmail
         expAvatarCircle.setAccessibilityRole(.button)
@@ -288,8 +295,15 @@ final class MessageCardView: NSObject {
             expandedContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             expandedContainer.bottomAnchor.constraint(equalTo: view.bottomAnchor),
 
-            expAvatarCircle.topAnchor.constraint(equalTo: expandedContainer.topAnchor, constant: 12),
-            expAvatarCircle.leadingAnchor.constraint(equalTo: expandedContainer.leadingAnchor, constant: 12),
+            // headerContainer fills the top of expandedContainer
+            headerContainer.topAnchor.constraint(equalTo: expandedContainer.topAnchor),
+            headerContainer.leadingAnchor.constraint(equalTo: expandedContainer.leadingAnchor),
+            headerContainer.trailingAnchor.constraint(equalTo: expandedContainer.trailingAnchor),
+            headerContainer.bottomAnchor.constraint(equalTo: expAvatarCircle.bottomAnchor, constant: 12),
+
+            // Header views anchor within headerContainer
+            expAvatarCircle.topAnchor.constraint(equalTo: headerContainer.topAnchor, constant: 12),
+            expAvatarCircle.leadingAnchor.constraint(equalTo: headerContainer.leadingAnchor, constant: 12),
             expAvatarCircle.widthAnchor.constraint(equalToConstant: 40),
             expAvatarCircle.heightAnchor.constraint(equalToConstant: 40),
             expAvatarLabel.centerXAnchor.constraint(equalTo: expAvatarCircle.centerXAnchor),
@@ -300,13 +314,14 @@ final class MessageCardView: NSObject {
             expSenderLabel.trailingAnchor.constraint(lessThanOrEqualTo: expDateLabel.leadingAnchor, constant: -12),
 
             expDateLabel.centerYAnchor.constraint(equalTo: expSenderLabel.centerYAnchor),
-            expDateLabel.trailingAnchor.constraint(equalTo: expandedContainer.trailingAnchor, constant: -12),
+            expDateLabel.trailingAnchor.constraint(equalTo: headerContainer.trailingAnchor, constant: -12),
 
             expRecipientLabel.topAnchor.constraint(equalTo: expSenderLabel.bottomAnchor, constant: 2),
             expRecipientLabel.leadingAnchor.constraint(equalTo: expSenderLabel.leadingAnchor),
-            expRecipientLabel.trailingAnchor.constraint(equalTo: expandedContainer.trailingAnchor, constant: -12),
+            expRecipientLabel.trailingAnchor.constraint(equalTo: headerContainer.trailingAnchor, constant: -12),
 
-            headerSeparator.topAnchor.constraint(equalTo: expAvatarCircle.bottomAnchor, constant: 12),
+            // headerSeparator anchors to headerContainer bottom
+            headerSeparator.topAnchor.constraint(equalTo: headerContainer.bottomAnchor),
             headerSeparator.leadingAnchor.constraint(equalTo: expandedContainer.leadingAnchor, constant: 12),
             headerSeparator.trailingAnchor.constraint(equalTo: expandedContainer.trailingAnchor, constant: -12),
 
