@@ -69,4 +69,31 @@ final class SidebarTests: XCTestCase {
         sidebar.onAuthErrorFix?("acc1")
         XCTAssertEqual(fixCalled, "acc1")
     }
+
+    func testSidebarShowsGmailCategories() {
+        let sidebar = SidebarView()
+        sidebar.setAccounts([(id: "g1", email: "u@gmail.com")], activeId: "g1")
+
+        // Simulate AccountManager.listFolders output for a Gmail account: standard
+        // Inbox + 5 category virtual folders.
+        let folders: [MailFolder] = [
+            MailFolder(id: "INBOX", name: "Inbox", totalCount: 0, hasUnread: false, role: .inbox),
+            MailFolder(id: "gmail:category:promotions", name: "Promotions", totalCount: 0, hasUnread: false, role: .category),
+            MailFolder(id: "gmail:category:social",     name: "Social",     totalCount: 0, hasUnread: false, role: .category),
+            MailFolder(id: "gmail:category:updates",    name: "Updates",    totalCount: 0, hasUnread: false, role: .category),
+            MailFolder(id: "gmail:category:forums",     name: "Forums",     totalCount: 0, hasUnread: false, role: .category),
+            MailFolder(id: "gmail:category:purchases",  name: "Purchases",  totalCount: 0, hasUnread: false, role: .category),
+        ]
+        sidebar.updateFolders(folders)
+        pumpRunLoop()
+
+        // Selecting one of the synthesized virtual folders fires the callback
+        // with the correct ID.
+        var selected: (String, String)?
+        sidebar.onFolderSelected = { acct, fid in selected = (acct, fid) }
+        sidebar.onFolderSelected?("g1", "gmail:category:promotions")
+
+        XCTAssertEqual(selected?.0, "g1")
+        XCTAssertEqual(selected?.1, "gmail:category:promotions")
+    }
 }
