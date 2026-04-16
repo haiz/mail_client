@@ -8,6 +8,7 @@ actor AccountManager: MailEngineProtocol {
 
     let store: MailStore
     let authManager: AuthManager
+    let categoriesRefresher: CategoriesRefresher?
 
     typealias ProviderFactory = @Sendable (AccountConfig, AuthManager, MailStore) -> any MailProvider
 
@@ -16,10 +17,16 @@ actor AccountManager: MailEngineProtocol {
     private let providerFactory: ProviderFactory?
     let deleteWorker: DeleteWorker
 
-    init(store: MailStore, authManager: AuthManager, providerFactory: ProviderFactory? = nil) {
+    init(
+        store: MailStore,
+        authManager: AuthManager,
+        providerFactory: ProviderFactory? = nil,
+        categoriesRefresher: CategoriesRefresher? = nil
+    ) {
         self.store = store
         self.authManager = authManager
         self.providerFactory = providerFactory
+        self.categoriesRefresher = categoriesRefresher
         // providerLookup is a temporary no-op; replaced in startDeleteWorker().
         self.deleteWorker = DeleteWorker(
             store: store,
@@ -109,6 +116,7 @@ actor AccountManager: MailEngineProtocol {
         try await provider.connect()
         try await provider.performInitialSync()
         try await store.warmSearchCache()
+        await refreshCategoriesIfApplicable(accountId: accountId)
     }
 
     /// Returns `true` when a provider was found and sync was attempted.
@@ -116,6 +124,7 @@ actor AccountManager: MailEngineProtocol {
     func performIncrementalSync(accountId: String) async throws -> Bool {
         guard let provider = providers[accountId] else { return false }
         try await provider.performIncrementalSync()
+        await refreshCategoriesIfApplicable(accountId: accountId)
         return true
     }
 
@@ -126,6 +135,7 @@ actor AccountManager: MailEngineProtocol {
                     try await provider.connect()
                 }
                 try await provider.performIncrementalSync()
+                await refreshCategoriesIfApplicable(accountId: accountId)
             } catch {
                 // Log but don't block other accounts
                 print("Sync failed for account \(accountId): \(error)")
@@ -510,6 +520,19 @@ actor AccountManager: MailEngineProtocol {
     }
 
     // MARK: - Helpers
+
+    /// Best-effort Gmail category refresh. Errors are swallowed so sync
+    /// success is never gated on categorization.
+    private func refreshCategoriesIfApplicable(accountId: String) async {
+        guard let refresher = categoriesRefresher else { return }
+        guard (try? await isGmailAccount(accountId: accountId)) == true else { return }
+        do {
+            try await refresher.refresh(accountId: accountId)
+        } catch {
+            // Service-level errors are already logged inside the refresher.
+            // Sync success is independent of categorization.
+        }
+    }
 
     private func isGmailAccount(accountId: String) async throws -> Bool {
         guard let record = try await store.getAccount(id: accountId) else { return false }

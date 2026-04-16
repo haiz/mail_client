@@ -242,4 +242,84 @@ final class SyncWorkflowTests: XCTestCase {
         let ids = Set(headers.map { $0.messageId })
         XCTAssertEqual(ids, ["<pers@x>"])
     }
+
+    // MARK: - CategoriesRefresher Sync Hooks
+
+    func testRefreshCategoriesIsCalledAfterIncrementalSyncForGmailAccount() async throws {
+        let store = try MailStore(path: ":memory:")
+        let auth = AuthManager()
+        let acc = AccountRecord(
+            id: "gmail3", emailAddress: "u@gmail.com",
+            protocolType: "imap", imapHost: "imap.gmail.com",
+            authType: "oauth2", keychainRef: "k", isDefault: true
+        )
+        try await store.insertAccount(acc)
+
+        let spy = SpyCategoriesRefresher()
+        let mgr = AccountManager(
+            store: store, authManager: auth,
+            providerFactory: { config, _, _ in MockMailProvider(accountId: config.id) },
+            categoriesRefresher: spy
+        )
+        try await mgr.loadAccounts()
+
+        try await mgr.performIncrementalSync(accountId: "gmail3")
+
+        let calls = await spy.calls
+        XCTAssertEqual(calls, ["gmail3"])
+    }
+
+    func testRefreshCategoriesIsCalledAfterInitialSyncForGmailAccount() async throws {
+        let store = try MailStore(path: ":memory:")
+        let auth = AuthManager()
+        let acc = AccountRecord(
+            id: "gmail4", emailAddress: "u@gmail.com",
+            protocolType: "imap", imapHost: "imap.gmail.com",
+            authType: "oauth2", keychainRef: "k", isDefault: true
+        )
+        try await store.insertAccount(acc)
+
+        let spy = SpyCategoriesRefresher()
+        let mgr = AccountManager(
+            store: store, authManager: auth,
+            providerFactory: { config, _, _ in MockMailProvider(accountId: config.id) },
+            categoriesRefresher: spy
+        )
+        try await mgr.loadAccounts()
+
+        try await mgr.performInitialSync(accountId: "gmail4")
+        let calls = await spy.calls
+        XCTAssertEqual(calls, ["gmail4"])
+    }
+
+    func testRefreshCategoriesIsNotCalledForNonGmailAccount() async throws {
+        let store = try MailStore(path: ":memory:")
+        let auth = AuthManager()
+        let acc = AccountRecord(
+            id: "imap2", emailAddress: "u@example.com",
+            protocolType: "imap", imapHost: "imap.example.com",
+            authType: "password", keychainRef: "k", isDefault: true
+        )
+        try await store.insertAccount(acc)
+
+        let spy = SpyCategoriesRefresher()
+        let mgr = AccountManager(
+            store: store, authManager: auth,
+            providerFactory: { config, _, _ in MockMailProvider(accountId: config.id) },
+            categoriesRefresher: spy
+        )
+        try await mgr.loadAccounts()
+
+        try await mgr.performIncrementalSync(accountId: "imap2")
+        let calls = await spy.calls
+        XCTAssertTrue(calls.isEmpty)
+    }
+}
+
+/// Spy actor implementing CategoriesRefresher protocol — captures call history.
+actor SpyCategoriesRefresher: CategoriesRefresher {
+    private(set) var calls: [String] = []
+    func refresh(accountId: String) async throws {
+        calls.append(accountId)
+    }
 }
