@@ -496,6 +496,12 @@ final class MessageCardView: NSObject {
                      border-left: 3px solid #ddd; color: #666; }
         pre, code { padding: 2px 6px; border-radius: 4px; font-size: 13px;
                     background: #f5f5f5; }
+        @media (prefers-color-scheme: dark) {
+            body { color: #e0e0e0; background: #1e1e1e; }
+            a { color: #4da3ff; }
+            blockquote { border-left-color: #555; color: #aaa; }
+            pre, code { background: #2a2a2a; }
+        }
         </style></head><body>\(html)</body></html>
         """
 

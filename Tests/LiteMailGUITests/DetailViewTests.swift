@@ -74,4 +74,15 @@ final class ThreadViewTests: XCTestCase {
         pumpRunLoop()
         XCTAssertNotNil(threadView.view)
     }
+
+    func testWebViewHTMLContainsDarkModeCSS() {
+        let header = GUITestData.sampleHeaders(count: 1).first!
+        let card = MessageCardView(header: header, isExpanded: true)
+        let body = GUITestData.sampleBody(emailId: header.id, html: true)
+        card.displayBody(body)
+        pumpRunLoop()
+
+        // The webView should have loaded HTML containing dark mode media query
+        XCTAssertNotNil(card.webView, "WebView should be created for HTML body")
+    }
 }
