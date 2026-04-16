@@ -323,9 +323,9 @@ final class MessageListView: NSObject {
         updateEmptyState()
     }
 
-    /// Select all visible emails.
+    /// Select all loaded emails (including every message within each thread group).
     func selectAllChecked() {
-        checkedIds = Set(threadGroups.map { $0.primaryHeader.id })
+        checkedIds = Set(messages.map { $0.id })
         tableView.reloadData()
         updateBulkBar()
         onCheckedIdsChanged?(checkedIds)
