@@ -75,6 +75,25 @@ final class ThreadViewTests: XCTestCase {
         XCTAssertNotNil(threadView.view)
     }
 
+    func testCollapsedCardHasAccessibilityRole() {
+        let header = GUITestData.sampleHeaders(count: 1).first!
+        let card = MessageCardView(header: header, isExpanded: false)
+        pumpRunLoop()
+
+        XCTAssertEqual(card.view.accessibilityRole(), .button)
+        XCTAssertTrue(card.view.accessibilityLabel()?.contains("Expand") ?? false,
+                      "Collapsed card should have 'Expand message from...' label")
+    }
+
+    func testCardViewAcceptsFirstResponder() {
+        let header = GUITestData.sampleHeaders(count: 1).first!
+        let card = MessageCardView(header: header, isExpanded: false)
+        pumpRunLoop()
+
+        XCTAssertTrue(card.view.acceptsFirstResponder,
+                      "MessageCardContainerView must accept first responder for keyboard nav")
+    }
+
     func testWebViewHTMLContainsDarkModeCSS() {
         let header = GUITestData.sampleHeaders(count: 1).first!
         let card = MessageCardView(header: header, isExpanded: true)

@@ -1,6 +1,22 @@
 import AppKit
 import WebKit
 
+/// NSView subclass that accepts first responder for keyboard navigation
+/// and forwards Enter/Space to the card's toggle-expand handler.
+private final class MessageCardContainerView: NSView {
+    var onKeyActivate: (() -> Void)?
+
+    override var acceptsFirstResponder: Bool { true }
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 36 || event.keyCode == 49 { // Enter or Space
+            onKeyActivate?()
+        } else {
+            super.keyDown(with: event)
+        }
+    }
+}
+
 /// Renders a single email as a card — either collapsed (one-line summary)
 /// or expanded (full header + body + action buttons).
 final class MessageCardView: NSObject {
@@ -73,7 +89,7 @@ final class MessageCardView: NSObject {
         self.header = header
         self.isExpanded = isExpanded
 
-        view = NSView()
+        view = MessageCardContainerView()
         view.wantsLayer = true
 
         // Collapsed avatar
@@ -134,6 +150,17 @@ final class MessageCardView: NSObject {
         setupExpandedLayout()
         configureContent()
         updateVisibility()
+
+        // Set initial accessibility state on the container view
+        let initDisplayName = header.senderName ?? header.senderEmail
+        view.setAccessibilityRole(.button)
+        view.setAccessibilityLabel(isExpanded
+            ? "Collapse message from \(initDisplayName)"
+            : "Expand message from \(initDisplayName)")
+
+        (view as? MessageCardContainerView)?.onKeyActivate = { [weak self] in
+            self?.onToggleExpand?()
+        }
     }
 
     // MARK: - Collapsed Layout
@@ -171,6 +198,10 @@ final class MessageCardView: NSObject {
         // Click gesture on collapsed container
         let click = NSClickGestureRecognizer(target: self, action: #selector(cardClicked))
         collapsedContainer.addGestureRecognizer(click)
+
+        let displayName = header.senderName ?? header.senderEmail
+        collapsedContainer.setAccessibilityRole(.button)
+        collapsedContainer.setAccessibilityLabel("Expand message from \(displayName)")
 
         NSLayoutConstraint.activate([
             collapsedContainer.topAnchor.constraint(equalTo: view.topAnchor),
@@ -244,6 +275,10 @@ final class MessageCardView: NSObject {
         expAvatarCircle.addGestureRecognizer(headerClick)
         let senderClick = NSClickGestureRecognizer(target: self, action: #selector(cardClicked))
         expSenderLabel.addGestureRecognizer(senderClick)
+
+        let expDisplayName = header.senderName ?? header.senderEmail
+        expAvatarCircle.setAccessibilityRole(.button)
+        expAvatarCircle.setAccessibilityLabel("Collapse message from \(expDisplayName)")
 
         expandedTopConstraint = expandedContainer.topAnchor.constraint(equalTo: view.topAnchor)
 
@@ -324,6 +359,12 @@ final class MessageCardView: NSObject {
     func setExpanded(_ expanded: Bool, animated: Bool = true) {
         guard expanded != isExpanded else { return }
         isExpanded = expanded
+
+        let displayName = header.senderName ?? header.senderEmail
+        view.setAccessibilityRole(.button)
+        view.setAccessibilityLabel(expanded
+            ? "Collapse message from \(displayName)"
+            : "Expand message from \(displayName)")
 
         if !expanded {
             // Release WebView on collapse to free memory
