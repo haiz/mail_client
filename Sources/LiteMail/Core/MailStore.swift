@@ -285,6 +285,13 @@ actor MailStore {
             try db.create(index: "idx_delete_jobs_email", on: "delete_jobs", columns: ["email_id"])
         }
 
+        // v8: snippet column for thread card previews without fetching full body.
+        migrator.registerMigration("v8_snippet") { db in
+            try db.alter(table: "emails") { t in
+                t.add(column: "snippet", .text)
+            }
+        }
+
         try migrator.migrate(dbPool)
     }
 
@@ -380,6 +387,15 @@ actor MailStore {
                     arguments: [emailId, row["subject"], text, row["sender_name"], row["sender_email"]]
                 )
             }
+        }
+    }
+
+    func updateSnippet(emailId: Int64, snippet: String) throws {
+        try dbPool.write { db in
+            try db.execute(
+                sql: "UPDATE emails SET snippet = ? WHERE id = ?",
+                arguments: [snippet, emailId]
+            )
         }
     }
 
@@ -969,9 +985,10 @@ struct EmailRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var createdAt: Int?
     var accountId: String?
     var deleteState: String = "synced"
+    var snippet: String?
 
     enum CodingKeys: String, CodingKey {
-        case id, folder, subject, date, uid, flags, recipients
+        case id, folder, subject, date, uid, flags, recipients, snippet
         case messageId = "message_id"
         case threadId = "thread_id"
         case senderName = "sender_name"

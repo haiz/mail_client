@@ -394,4 +394,27 @@ final class MailStoreTests: XCTestCase {
         record.uid = uid
         return record
     }
+
+    // MARK: - Snippet Tests
+
+    func testSnippetStorageAndRetrieval() async throws {
+        var record = makeEmail(messageId: "<snippet@test.com>")
+        record.snippet = "This is a preview of the email content..."
+        let id = try await store.insertEmail(record)
+
+        let fetched = try await store.fetchEmailRecord(id: id)
+        XCTAssertEqual(fetched?.snippet, "This is a preview of the email content...")
+    }
+
+    func testUpdateSnippet() async throws {
+        let record = makeEmail(messageId: "<update-snippet@test.com>")
+        let id = try await store.insertEmail(record)
+
+        let before = try await store.fetchEmailRecord(id: id)
+        XCTAssertNil(before?.snippet)
+
+        try await store.updateSnippet(emailId: id, snippet: "Updated preview text")
+        let after = try await store.fetchEmailRecord(id: id)
+        XCTAssertEqual(after?.snippet, "Updated preview text")
+    }
 }
