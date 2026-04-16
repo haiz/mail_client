@@ -611,6 +611,11 @@ private final class MessageCellView: NSTableCellView {
         checkbox.isHidden = !shouldShow
     }
 
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        threadBadge.layer?.backgroundColor = NSColor.secondaryLabelColor.cgColor
+    }
+
     @objc private func checkboxClicked() {
         onCheckboxToggled?()
     }
