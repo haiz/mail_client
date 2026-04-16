@@ -13,6 +13,7 @@ final class ComposerWindow: NSObject {
     private let bodyTextView: NSTextView
     private let bodyScrollView: NSScrollView
     private let sendButton: NSButton
+    private let validationLabel: NSTextField
 
     private let attachButton: NSButton
     private let attachmentChipsBar: NSStackView
@@ -127,6 +128,12 @@ final class ComposerWindow: NSObject {
         sendButton.keyEquivalentModifierMask = .command
         sendButton.contentTintColor = .white
         sendButton.bezelColor = .controlAccentColor
+
+        validationLabel = NSTextField(labelWithString: "")
+        validationLabel.font = .systemFont(ofSize: 11)
+        validationLabel.textColor = .systemRed
+        validationLabel.isHidden = true
+        validationLabel.translatesAutoresizingMaskIntoConstraints = false
 
         super.init()
 
@@ -284,6 +291,10 @@ final class ComposerWindow: NSObject {
             row.addArrangedSubview(lbl)
             row.addArrangedSubview(field)
             stack.addArrangedSubview(row)
+            // Insert validation label right after the To row
+            if field === toField {
+                stack.addArrangedSubview(validationLabel)
+            }
         }
 
         let separator = NSBox()
@@ -358,13 +369,17 @@ final class ComposerWindow: NSObject {
     // MARK: - Prefill
 
     private func prefill(mode: Mode) {
-        // Auto-append signature
         let signature = UserDefaults.standard.string(forKey: "email_signature") ?? ""
         let signatureBlock = signature.isEmpty ? "" : "\n\n--\n\(signature)"
+        let bodyAttrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 14),
+            .foregroundColor: NSColor.labelColor,
+        ]
 
         switch mode {
         case .compose:
-            bodyTextView.string = signatureBlock
+            let text = NSAttributedString(string: signatureBlock, attributes: bodyAttrs)
+            bodyTextView.textStorage?.setAttributedString(text)
 
         case .reply(let header, let body):
             toField.stringValue = header.senderEmail
@@ -374,7 +389,9 @@ final class ComposerWindow: NSObject {
             if let text = body?.textBody {
                 quotedText += text.split(separator: "\n").map { "> \($0)" }.joined(separator: "\n")
             }
-            bodyTextView.string = quotedText
+            bodyTextView.textStorage?.setAttributedString(
+                NSAttributedString(string: quotedText, attributes: bodyAttrs)
+            )
 
         case .forward(let header, let body):
             subjectField.stringValue = header.subject.map { "Fwd: \($0)" } ?? "Fwd:"
@@ -386,7 +403,9 @@ final class ComposerWindow: NSObject {
             if let text = body?.textBody {
                 fwdText += text
             }
-            bodyTextView.string = fwdText
+            bodyTextView.textStorage?.setAttributedString(
+                NSAttributedString(string: fwdText, attributes: bodyAttrs)
+            )
         }
     }
 
@@ -502,7 +521,7 @@ final class ComposerWindow: NSObject {
     @objc private func sendClicked() {
         let message = buildMessage()
         guard !message.to.isEmpty else {
-            NSSound.beep()
+            showToValidationError()
             return
         }
 
@@ -532,6 +551,28 @@ final class ComposerWindow: NSObject {
                 }
             }
         }
+    }
+
+    private func showToValidationError() {
+        validationLabel.stringValue = "Add at least one recipient"
+        validationLabel.isHidden = false
+
+        toField.wantsLayer = true
+        toField.layer?.borderColor = NSColor.systemRed.cgColor
+        toField.layer?.borderWidth = 1
+        toField.layer?.cornerRadius = 4
+
+        window.makeFirstResponder(toField)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            guard let self else { return }
+            self.clearToValidationError()
+        }
+    }
+
+    private func clearToValidationError() {
+        validationLabel.isHidden = true
+        toField.layer?.borderWidth = 0
     }
 
     private func buildMessage() -> OutgoingMessage {
@@ -616,6 +657,11 @@ final class ComposerWindow: NSObject {
 
 extension ComposerWindow: NSTextFieldDelegate {
     func controlTextDidChange(_ obj: Notification) {
+        // Clear validation error when user types in the To field
+        if let field = obj.object as? NSTextField, field === toField {
+            clearToValidationError()
+        }
+
         guard let field = obj.object as? NSTextField,
               (field === toField || field === ccField || field === bccField) else { return }
 
