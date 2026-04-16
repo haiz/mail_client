@@ -560,6 +560,13 @@ final class MessageCardView: NSObject {
 
     // MARK: - Helpers
 
+    private static let fallbackDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .medium
+        f.timeStyle = .short
+        return f
+    }()
+
     private static func relativeDate(_ date: Date) -> String {
         let seconds = Date().timeIntervalSince(date)
         if seconds < 60 { return "just now" }
@@ -567,10 +574,7 @@ final class MessageCardView: NSObject {
         if seconds < 86400 { return "\(Int(seconds / 3600))h ago" }
         if seconds < 172800 { return "Yesterday" }
         if seconds < 604800 { return "\(Int(seconds / 86400))d ago" }
-        let f = DateFormatter()
-        f.dateStyle = .medium
-        f.timeStyle = .short
-        return f.string(from: date)
+        return Self.fallbackDateFormatter.string(from: date)
     }
 
     private static func formatFileSize(_ bytes: Int) -> String {
