@@ -401,8 +401,27 @@ actor MailStore {
 
     func fetchHeaders(accountId: String, folder: String, offset: Int, limit: Int) throws -> [EmailRecord] {
         try dbPool.read { db in
-            try EmailRecord
-                .filter(Column("account_id") == accountId && Column("folder") == folder && Column("is_deleted") == false && Column("delete_state") != "pending_delete")
+            let basePredicate = Column("account_id") == accountId
+                && Column("is_deleted") == false
+                && Column("delete_state") != "pending_delete"
+
+            let folderPredicate: SQLExpression
+            if let category = GmailCategory(virtualFolderId: folder) {
+                // Virtual category folder — filter by gmail_category within INBOX.
+                let inboxFilter = Column("folder") == "INBOX"
+                if category == .personal {
+                    folderPredicate = inboxFilter
+                        && (Column("gmail_category") == category.rawValue || Column("gmail_category") == nil)
+                } else {
+                    folderPredicate = inboxFilter
+                        && Column("gmail_category") == category.rawValue
+                }
+            } else {
+                folderPredicate = Column("folder") == folder
+            }
+
+            return try EmailRecord
+                .filter(basePredicate && folderPredicate)
                 .order(Column("date").desc)
                 .limit(limit, offset: offset)
                 .fetchAll(db)

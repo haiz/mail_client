@@ -442,6 +442,81 @@ final class MailStoreTests: XCTestCase {
         XCTAssertEqual(count, 0)
     }
 
+    func testFetchHeadersForCategoryFolderFiltersByCategory() async throws {
+        // Three messages, one in each category, all in INBOX.
+        let promo = makeEmail(messageId: "<promo@x>", uid: 100, gmailCategory: "promotions")
+        let soc = makeEmail(messageId: "<soc@x>", uid: 101, gmailCategory: "social")
+        let pers = makeEmail(messageId: "<pers@x>", uid: 102, gmailCategory: "personal")
+        _ = try await store.insertEmail(promo)
+        _ = try await store.insertEmail(soc)
+        _ = try await store.insertEmail(pers)
+
+        let promos = try await store.fetchHeaders(
+            accountId: testAccountId,
+            folder: "gmail:category:promotions",
+            offset: 0, limit: 10
+        )
+        XCTAssertEqual(promos.count, 1)
+        XCTAssertEqual(promos.first?.messageId, "<promo@x>")
+
+        let socials = try await store.fetchHeaders(
+            accountId: testAccountId,
+            folder: "gmail:category:social",
+            offset: 0, limit: 10
+        )
+        XCTAssertEqual(socials.count, 1)
+        XCTAssertEqual(socials.first?.messageId, "<soc@x>")
+    }
+
+    func testFetchHeadersForPersonalIncludesNullCategory() async throws {
+        // Messages without a category yet (NULL) should appear in Primary.
+        let null1 = makeEmail(messageId: "<null1@x>", uid: 200)
+        let pers = makeEmail(messageId: "<pers@x>", uid: 201, gmailCategory: "personal")
+        let promo = makeEmail(messageId: "<promo@x>", uid: 202, gmailCategory: "promotions")
+        _ = try await store.insertEmail(null1)
+        _ = try await store.insertEmail(pers)
+        _ = try await store.insertEmail(promo)
+
+        let primary = try await store.fetchHeaders(
+            accountId: testAccountId,
+            folder: "gmail:category:personal",
+            offset: 0, limit: 10
+        )
+        let ids = Set(primary.map { $0.messageId })
+        XCTAssertEqual(ids, ["<null1@x>", "<pers@x>"], "Primary = personal + NULL category")
+    }
+
+    func testFetchHeadersCategoryQueryRequiresInboxFolder() async throws {
+        // A promotions-categorized message in Trash must NOT show up in the
+        // Promotions virtual folder.
+        let promo = makeEmail(messageId: "<promo-trash@x>", folder: "[Gmail]/Trash", uid: 300, gmailCategory: "promotions")
+        _ = try await store.insertEmail(promo)
+
+        let promos = try await store.fetchHeaders(
+            accountId: testAccountId,
+            folder: "gmail:category:promotions",
+            offset: 0, limit: 10
+        )
+        XCTAssertTrue(promos.isEmpty)
+    }
+
+    func testFetchHeadersForLiteralInboxIsUnchanged() async throws {
+        // INBOX (literal) without category routing: returns ALL inbox messages,
+        // regardless of gmail_category. This preserves backwards compatibility
+        // for non-Gmail accounts and direct callers.
+        let promo = makeEmail(messageId: "<promo-inbox@x>", uid: 400, gmailCategory: "promotions")
+        let plain = makeEmail(messageId: "<plain-inbox@x>", uid: 401)
+        _ = try await store.insertEmail(promo)
+        _ = try await store.insertEmail(plain)
+
+        let inbox = try await store.fetchHeaders(
+            accountId: testAccountId,
+            folder: "INBOX",
+            offset: 0, limit: 10
+        )
+        XCTAssertEqual(inbox.count, 2)
+    }
+
     // MARK: - Helpers
 
     private func makeEmail(
@@ -450,7 +525,8 @@ final class MailStoreTests: XCTestCase {
         senderName: String? = nil,
         accountId: String? = nil,
         folder: String = "INBOX",
-        uid: Int? = nil
+        uid: Int? = nil,
+        gmailCategory: String? = nil
     ) -> EmailRecord {
         var record = EmailRecord(
             messageId: messageId,
@@ -465,6 +541,7 @@ final class MailStoreTests: XCTestCase {
             accountId: accountId ?? testAccountId
         )
         record.uid = uid
+        record.gmailCategory = gmailCategory
         return record
     }
 }
