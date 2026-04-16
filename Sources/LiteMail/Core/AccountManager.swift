@@ -170,14 +170,14 @@ actor AccountManager: MailEngineProtocol {
     // MARK: - Read
 
     func fetchHeaders(accountId: String, folder: String, offset: Int, limit: Int) async throws -> [EmailHeader] {
-        // Use concurrent reader to avoid blocking behind sync writes on the actor.
-        let records = try store.concurrentReader.read { db in
-            try EmailRecord
-                .filter(Column("account_id") == accountId && Column("folder") == folder && Column("is_deleted") == false)
-                .order(Column("date").desc)
-                .limit(limit, offset: offset)
-                .fetchAll(db)
+        var resolvedFolder = folder
+        if folder == "INBOX", try await isGmailAccount(accountId: accountId) {
+            resolvedFolder = GmailCategory.personal.virtualFolderId
         }
+        let records = try await store.fetchHeaders(
+            accountId: accountId, folder: resolvedFolder,
+            offset: offset, limit: limit
+        )
         return records.map(Self.recordToHeader)
     }
 
@@ -229,7 +229,49 @@ actor AccountManager: MailEngineProtocol {
 
     func listFolders(accountId: String) async throws -> [MailFolder] {
         let folders = try await store.listFolders(accountId: accountId)
-        return folders.map { MailFolder(id: $0.folder, name: Self.displayName(for: $0.folder), totalCount: $0.totalCount, hasUnread: $0.hasUnread, role: Self.folderRole(for: $0.folder)) }
+        var result = folders.map {
+            MailFolder(
+                id: $0.folder,
+                name: Self.displayName(for: $0.folder),
+                totalCount: $0.totalCount,
+                hasUnread: $0.hasUnread,
+                role: Self.folderRole(for: $0.folder)
+            )
+        }
+
+        // Synthesize Gmail category virtual folders for Gmail accounts only.
+        guard try await isGmailAccount(accountId: accountId) else { return result }
+
+        let counts = try await store.gmailCategoryCounts(accountId: accountId)
+        let categoryEntries: [MailFolder] = GmailCategory.allCases.compactMap { cat -> MailFolder? in
+            // Personal is surfaced via the existing INBOX entry, not as its own
+            // virtual folder — see Inbox count override below. Skip it here.
+            guard cat != .personal else { return nil }
+            let c = counts[cat.rawValue] ?? (total: 0, unread: 0)
+            return MailFolder(
+                id: cat.virtualFolderId,
+                name: Self.displayNameForCategory(cat),
+                totalCount: c.total,
+                hasUnread: c.unread > 0,
+                role: .category
+            )
+        }
+        result.append(contentsOf: categoryEntries)
+
+        // Override the existing INBOX entry's count with Primary-only count.
+        let primary = counts[GmailCategory.personal.rawValue] ?? (total: 0, unread: 0)
+        if let inboxIdx = result.firstIndex(where: { $0.id == "INBOX" }) {
+            let original = result[inboxIdx]
+            result[inboxIdx] = MailFolder(
+                id: original.id,
+                name: original.name,
+                totalCount: primary.total,
+                hasUnread: primary.unread > 0,
+                role: original.role
+            )
+        }
+
+        return result
     }
 
     // MARK: - Actions
@@ -469,6 +511,13 @@ actor AccountManager: MailEngineProtocol {
 
     // MARK: - Helpers
 
+    private func isGmailAccount(accountId: String) async throws -> Bool {
+        guard let record = try await store.getAccount(id: accountId) else { return false }
+        let email = record.emailAddress.lowercased()
+        let isGmailDomain = email.hasSuffix("@gmail.com") || email.hasSuffix("@googlemail.com")
+        return isGmailDomain && record.authType == "oauth2"
+    }
+
     private func createProvider(for config: AccountConfig) -> any MailProvider {
         if let factory = providerFactory {
             return factory(config, authManager, store)
@@ -535,6 +584,17 @@ actor AccountManager: MailEngineProtocol {
         }
     }
 
+    private static func displayNameForCategory(_ category: GmailCategory) -> String {
+        switch category {
+        case .personal:   return "Primary"
+        case .promotions: return "Promotions"
+        case .social:     return "Social"
+        case .updates:    return "Updates"
+        case .forums:     return "Forums"
+        case .purchases:  return "Purchases"
+        }
+    }
+
     static func folderRole(for folderId: String) -> FolderRole? {
         switch folderId {
         case "INBOX": return .inbox
@@ -546,6 +606,7 @@ actor AccountManager: MailEngineProtocol {
         case "[Gmail]/Spam", "Spam", "Junk": return .spam
         default:
             if folderId.hasPrefix("[Gmail]/Category/") { return .category }
+            if GmailCategory(virtualFolderId: folderId) != nil { return .category }
             return nil
         }
     }
