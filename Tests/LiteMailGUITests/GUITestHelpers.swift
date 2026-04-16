@@ -69,6 +69,28 @@ enum GUITestData {
             AttachmentInfo(id: "att-2", partId: "1.2", filename: "report.pdf", mimeType: "application/pdf", sizeBytes: 512000),
         ]
     }
+
+    /// Sample thread: emails with same threadId, sorted by date ASC (oldest first).
+    static func sampleThread(threadId: String = "thread-conv", count: Int = 3) -> [EmailHeader] {
+        (1...count).map { i in
+            EmailHeader(
+                id: Int64(100 + i),
+                accountId: testAccountId,
+                messageId: "<thread-\(i)@test>",
+                threadId: threadId,
+                folder: "INBOX",
+                senderName: "Thread Sender \(i)",
+                senderEmail: "thread\(i)@example.com",
+                subject: "Re: Thread Subject",
+                date: Date().addingTimeInterval(Double(i * 3600)),
+                isRead: i < count,  // last email is unread
+                isStarred: false,
+                hasAttachments: i == 2,
+                snippet: "Message \(i) preview text...",
+                deleteState: "synced"
+            )
+        }
+    }
 }
 
 /// Pump the RunLoop to allow AppKit layout/rendering to complete.
