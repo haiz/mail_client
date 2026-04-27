@@ -263,6 +263,7 @@ final class UIReviewRunner: NSObject {
             isStarred: r.isStarred,
             hasAttachments: r.hasAttachments,
             snippet: nil,
+            recipients: r.recipients,
             deleteState: r.deleteState
         )
     }

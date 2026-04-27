@@ -142,6 +142,12 @@ final class MainWindowController: NSObject {
             guard !ids.isEmpty else { return }
             onAction?(.batchMove(ids, ""))
         }
+        messageListView.bulkActionBar.onMarkSpam = { [weak self] in
+            guard let self else { return }
+            let ids = Array(messageListView.checkedIds)
+            guard !ids.isEmpty else { return }
+            onAction?(.batchMarkSpam(ids))
+        }
         messageListView.bulkActionBar.onSelectAll = { [weak self] in
             self?.messageListView.selectAllChecked()
         }
@@ -320,6 +326,7 @@ enum MailAction {
     case moveToFolder(Int64, String)
     case compose
     case reply(Int64)
+    case replyAll(Int64)
     case forward(Int64)
     case search(String)
     case refresh
@@ -329,4 +336,6 @@ enum MailAction {
     case batchMarkUnread([Int64])
     case batchToggleStar([Int64])
     case batchMove([Int64], String)
+    case markSpam(Int64)
+    case batchMarkSpam([Int64])
 }

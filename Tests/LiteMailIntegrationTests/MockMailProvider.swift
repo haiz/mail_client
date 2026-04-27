@@ -154,6 +154,10 @@ actor MockMailProvider: MailProvider {
         if let error = stubbedError { throw error }
     }
 
+    func markSpamBatch(messageRefs: [String]) async throws {
+        calls.append("markSpamBatch:\(messageRefs.joined(separator: ","))")
+    }
+
     func fetchAttachment(messageRef: String, partId: String) async throws -> Data {
         calls.append("fetchAttachment:\(messageRef):\(partId)")
         fetchAttachmentCalls.append((ref: messageRef, partId: partId))

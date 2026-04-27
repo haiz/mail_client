@@ -68,6 +68,7 @@ protocol MailProvider: Actor {
     func markStarredBatch(messageRefs: [String], starred: Bool) async throws
     func moveMessageBatch(messageRefs: [String], toFolderId: String) async throws
     func deleteMessageBatch(messageRefs: [String]) async throws
+    func markSpamBatch(messageRefs: [String]) async throws
 
     // MARK: - Attachments
 
@@ -91,7 +92,9 @@ struct ProviderFolder: Sendable {
 
 enum FolderRole: String, Sendable {
     case inbox, sent, drafts, trash, starred, archive, spam, all
-    case category  // Gmail Categories (Promotions, Social, Updates, Forums, Purchases)
+    case category   // Gmail Categories (Promotions, Social, Updates, Forums, Purchases)
+    case scheduled  // Virtual "Scheduled" outbox folder
+    case snoozed    // Virtual "Snoozed" folder
 }
 
 /// Message header as reported by the provider.

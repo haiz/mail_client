@@ -1,5 +1,16 @@
-// Sources/LiteMail/Core/DisplayPreferences.swift
 import Foundation
+
+enum RemoteImagePolicy: String {
+    case blockAll = "block_all"
+    case blockUnknown = "block_unknown"
+    case allowAll = "allow_all"
+}
+
+enum BodyRendering: String {
+    case auto
+    case html
+    case plain
+}
 
 /// Display-related user preferences backed by UserDefaults.
 enum DisplayPreferences {
@@ -25,9 +36,36 @@ enum DisplayPreferences {
             NotificationCenter.default.post(name: .emailListLimitChanged, object: nil)
         }
     }
+
+    static let bodyRenderingDefaultsKey = "bodyRendering"
+
+    static var bodyRendering: BodyRendering {
+        get {
+            let raw = UserDefaults.standard.string(forKey: bodyRenderingDefaultsKey) ?? ""
+            return BodyRendering(rawValue: raw) ?? .auto
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: bodyRenderingDefaultsKey)
+            NotificationCenter.default.post(name: .bodyRenderingChanged, object: nil)
+        }
+    }
+
+    static let remoteImagePolicyDefaultsKey = "remoteImagePolicy"
+
+    static var remoteImagePolicy: RemoteImagePolicy {
+        get {
+            let raw = UserDefaults.standard.string(forKey: remoteImagePolicyDefaultsKey) ?? ""
+            return RemoteImagePolicy(rawValue: raw) ?? .blockUnknown
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: remoteImagePolicyDefaultsKey)
+            NotificationCenter.default.post(name: .remoteImagePolicyChanged, object: nil)
+        }
+    }
 }
 
 extension Notification.Name {
-    /// Posted when `DisplayPreferences.emailListLimit` changes so the message list can refresh.
     static let emailListLimitChanged = Notification.Name("LiteMail.emailListLimitChanged")
+    static let remoteImagePolicyChanged = Notification.Name("LiteMail.remoteImagePolicyChanged")
+    static let bodyRenderingChanged = Notification.Name("LiteMail.bodyRenderingChanged")
 }

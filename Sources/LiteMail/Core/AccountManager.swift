@@ -162,9 +162,34 @@ actor AccountManager: MailEngineProtocol {
 
     // MARK: - Search
 
+    static let unifiedAccountId = "__unified__"
+
+    func fetchUnifiedInbox(offset: Int, limit: Int) async throws -> [EmailHeader] {
+        let accountIds = try await store.listAccounts().map(\.id)
+        let records = try await store.fetchInboxesAcrossAccounts(accountIds: accountIds, offset: offset, limit: limit)
+        return records.map(Self.recordToHeader)
+    }
+
     func search(query: String, accountId: String? = nil) async throws -> [EmailHeader] {
+        let parsed = SearchQueryParser.parse(query)
+        if !parsed.predicates.isEmpty {
+            let records = try await store.search(parsed: parsed, accountId: accountId)
+            return records.map(Self.recordToHeader)
+        }
         let records = try await store.search(query: query, accountId: accountId)
         return records.map(Self.recordToHeader)
+    }
+
+    func listSavedSearches(accountId: String? = nil) async throws -> [MailStore.SavedSearchRecord] {
+        try await store.fetchSavedSearches(accountId: accountId)
+    }
+
+    func saveSearch(accountId: String?, name: String, query: String) async throws -> Int64 {
+        try await store.insertSavedSearch(accountId: accountId, name: name, query: query)
+    }
+
+    func deleteSavedSearch(id: Int64) async throws {
+        try await store.deleteSavedSearch(id: id)
     }
 
     // MARK: - Read
@@ -229,7 +254,61 @@ actor AccountManager: MailEngineProtocol {
 
     func listFolders(accountId: String) async throws -> [MailFolder] {
         let folders = try await store.listFolders(accountId: accountId)
-        return folders.map { MailFolder(id: $0.folder, name: Self.displayName(for: $0.folder), totalCount: $0.totalCount, hasUnread: $0.hasUnread, role: Self.folderRole(for: $0.folder)) }
+        var result = folders.map { MailFolder(id: $0.folder, name: Self.displayName(for: $0.folder), totalCount: $0.totalCount, hasUnread: $0.hasUnread, role: Self.folderRole(for: $0.folder)) }
+        let scheduledCount = (try? await store.scheduledCount(accountId: accountId)) ?? 0
+        let scheduled = MailFolder(id: "__scheduled__", name: "Scheduled",
+                                   totalCount: scheduledCount, hasUnread: false, role: .scheduled)
+        if let draftsIdx = result.firstIndex(where: { $0.role == .drafts }) {
+            result.insert(scheduled, at: draftsIdx + 1)
+        } else {
+            result.append(scheduled)
+        }
+
+        let snoozedCount = (try? await store.snoozedCount(accountId: accountId)) ?? 0
+        let snoozed = MailFolder(id: "__snoozed__", name: "Snoozed",
+                                 totalCount: snoozedCount, hasUnread: false, role: .snoozed)
+        result.append(snoozed)
+
+        return result
+    }
+
+    // MARK: - Scheduled Send
+
+    func scheduleSend(_ msg: OutgoingMessage, fromAccountId: String, sendAt: Date) async throws -> Int64 {
+        let rec = OutboxRecord(
+            toRecipients: Self.encodeJSON(msg.to),
+            ccRecipients: Self.encodeJSON(msg.cc),
+            bccRecipients: Self.encodeJSON(msg.bcc),
+            subject: msg.subject,
+            bodyText: msg.bodyText,
+            bodyHtml: msg.bodyHtml,
+            inReplyTo: msg.inReplyTo,
+            createdAt: Int(Date().timeIntervalSince1970),
+            status: "scheduled",
+            accountId: fromAccountId,
+            sendAfter: Int(sendAt.timeIntervalSince1970)
+        )
+        return try await store.enqueueOutgoing(rec)
+    }
+
+    func listScheduled(accountId: String) async throws -> [ScheduledMessage] {
+        let records = try await store.listScheduled(accountId: accountId)
+        return records.compactMap { rec in
+            guard let id = rec.id, let sendAfterInt = rec.sendAfter else { return nil }
+            let msg = rec.toOutgoingMessage()
+            return ScheduledMessage(
+                id: id,
+                to: msg.to,
+                subject: rec.subject,
+                sendAfter: Date(timeIntervalSince1970: TimeInterval(sendAfterInt)),
+                bodyText: rec.bodyText,
+                accountId: rec.accountId ?? accountId
+            )
+        }
+    }
+
+    func cancelScheduled(outboxId: Int64) async throws -> OutboxRecord? {
+        try await store.cancelOutgoing(id: outboxId)
     }
 
     // MARK: - Actions
@@ -269,6 +348,74 @@ actor AccountManager: MailEngineProtocol {
         if let (provider, ref) = try await providerAndRef(for: emailId, folderOverride: originalFolder) {
             Task { try? await provider.moveMessage(messageRef: ref, toFolderId: toFolder) }
         }
+    }
+
+    // MARK: - Snooze
+
+    func snooze(emailId: Int64, until: Date) async throws {
+        guard let rec = try await store.fetchEmailRecord(id: emailId) else { return }
+        let accountId = rec.accountId ?? "default"
+        let originalFolder = rec.folder
+        try await store.insertSnooze(emailId: emailId, accountId: accountId,
+                                     until: until, originalFolder: originalFolder)
+        // Archive locally so the email disappears from the inbox
+        try await store.markDeleted(emailId: emailId)
+        if let (provider, ref) = try await providerAndRef(for: emailId, folderOverride: originalFolder) {
+            let archiveFolderName = try await archiveFolderName(provider: provider, accountId: accountId)
+            Task { try? await provider.moveMessage(messageRef: ref, toFolderId: archiveFolderName) }
+        }
+    }
+
+    func unsnooze(emailId: Int64) async throws {
+        guard let rec = try await store.fetchEmailRecord(id: emailId) else { return }
+        try await store.deleteSnooze(emailId: emailId)
+        try await store.restoreEmail(emailId: emailId)
+        if let (provider, ref) = try await providerAndRef(for: emailId, folderOverride: nil) {
+            let originalFolder = rec.folder
+            Task { try? await provider.moveMessage(messageRef: ref, toFolderId: originalFolder) }
+        }
+    }
+
+    func listSnoozed(accountId: String) async throws -> [EmailHeader] {
+        let records = try await store.listSnoozed(accountId: accountId)
+        return records.map { Self.recordToHeader($0) }
+    }
+
+    private func archiveFolderName(provider: any MailProvider, accountId: String) async throws -> String {
+        let folders = try await provider.listFolders()
+        return folders.first(where: { $0.role == .archive })?.id
+            ?? folders.first(where: { $0.role == .inbox })?.id
+            ?? "INBOX"
+    }
+
+    // MARK: - Spam
+
+    func markSpam(emailId: Int64) async throws {
+        let originalFolder = try await store.fetchEmailRecord(id: emailId)?.folder
+        try await store.markDeleted(emailId: emailId)
+        if let (provider, ref) = try await providerAndRef(for: emailId, folderOverride: originalFolder) {
+            Task { try? await provider.markSpamBatch(messageRefs: [ref]) }
+        }
+    }
+
+    func markSpamBatch(emailIds: [Int64]) async throws {
+        guard !emailIds.isEmpty else { return }
+        let records = try await store.fetchEmailRecords(ids: emailIds)
+        for rec in records { if let id = rec.id { try await store.markDeleted(emailId: id) } }
+        let groups = try await buildAccountGroups(records: records)
+        for (provider, refs) in groups {
+            Task { try? await provider.markSpamBatch(messageRefs: refs) }
+        }
+    }
+
+    // MARK: - Image Allowlist
+
+    func allowImages(accountId: String, sender: String) async throws {
+        try await store.allowImages(accountId: accountId, sender: sender)
+    }
+
+    func isImageAllowed(accountId: String, sender: String) async throws -> Bool {
+        try await store.isImageAllowed(accountId: accountId, sender: sender)
     }
 
     // MARK: - Batch Actions
@@ -431,7 +578,9 @@ actor AccountManager: MailEngineProtocol {
                 partId: partId,
                 filename: rec.filename,
                 mimeType: rec.mimeType,
-                sizeBytes: rec.sizeBytes
+                sizeBytes: rec.sizeBytes,
+                contentId: rec.contentId,
+                isInline: rec.contentId != nil
             )
         }
     }
@@ -452,6 +601,14 @@ actor AccountManager: MailEngineProtocol {
         try await provider.send(message: message)
     }
 
+    func signature(accountId: String) async throws -> String? {
+        try await store.signature(accountId: accountId)
+    }
+
+    func setSignature(accountId: String, html: String?) async throws {
+        try await store.setSignature(accountId: accountId, html: html)
+    }
+
     func saveDraft(_ draft: OutgoingMessage, accountId: String) async throws {
         let outbox = OutboxRecord(
             toRecipients: Self.encodeJSON(draft.to),
@@ -465,6 +622,59 @@ actor AccountManager: MailEngineProtocol {
             accountId: accountId
         )
         _ = try await store.queueOutgoing(outbox)
+    }
+
+    /// Queue a message for delayed sending. Returns the outbox row id.
+    /// The outbox worker will pick it up once `now >= sendAfter`.
+    func enqueueSend(_ msg: OutgoingMessage, fromAccountId: String, delaySeconds: Int) async throws -> Int64 {
+        let sendAfter = Int(Date().timeIntervalSince1970) + delaySeconds
+        let rec = OutboxRecord(
+            toRecipients: Self.encodeJSON(msg.to),
+            ccRecipients: Self.encodeJSON(msg.cc),
+            bccRecipients: Self.encodeJSON(msg.bcc),
+            subject: msg.subject,
+            bodyText: msg.bodyText,
+            bodyHtml: msg.bodyHtml,
+            inReplyTo: msg.inReplyTo,
+            createdAt: Int(Date().timeIntervalSince1970),
+            status: "queued",
+            accountId: fromAccountId,
+            sendAfter: sendAfter
+        )
+        return try await store.enqueueOutgoing(rec)
+    }
+
+    /// Cancel a queued send. Returns the OutboxRecord if it was still in "queued" state,
+    /// nil if it already fired.
+    func cancelSend(outboxId: Int64) async throws -> OutboxRecord? {
+        try await store.cancelOutgoing(id: outboxId)
+    }
+
+    // MARK: - Outbox Worker
+
+    /// Starts the background 1-second outbox processing loop.
+    /// Call once after account setup (in startDeleteWorker or AppDelegate).
+    func startOutboxWorker() {
+        Task.detached { [weak self] in
+            while true {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                await self?.processOutbox()
+            }
+        }
+    }
+
+    private func processOutbox() async {
+        let due = (try? await store.dueOutgoing(now: Date())) ?? []
+        for rec in due {
+            guard let id = rec.id, let accountId = rec.accountId else { continue }
+            guard (try? await store.atomicClaimForSending(id: id)) == true else { continue }
+            do {
+                try await send(message: rec.toOutgoingMessage(), fromAccountId: accountId)
+                try? await store.updateOutboxStatus(id: id, status: "sent")
+            } catch {
+                try? await store.setOutgoingError(id: id, error: "\(error)")
+            }
+        }
     }
 
     // MARK: - Helpers
@@ -496,6 +706,7 @@ actor AccountManager: MailEngineProtocol {
             isStarred: r.isStarred,
             hasAttachments: r.hasAttachments,
             snippet: r.snippet,
+            recipients: r.recipients,
             deleteState: r.deleteState
         )
     }

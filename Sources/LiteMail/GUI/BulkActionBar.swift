@@ -18,6 +18,7 @@ final class BulkActionBar: NSView {
     private let markReadButton: CursorButton
     private let starButton: CursorButton
     private let moveButton: CursorButton
+    private let spamButton: CursorButton
 
     // MARK: - Callbacks
 
@@ -26,6 +27,7 @@ final class BulkActionBar: NSView {
     var onMarkRead: (() -> Void)?
     var onStar: (() -> Void)?
     var onMove: (() -> Void)?
+    var onMarkSpam: (() -> Void)?
     var onDeselectAll: (() -> Void)?
     var onSelectAll: (() -> Void)?
 
@@ -68,17 +70,18 @@ final class BulkActionBar: NSView {
             return btn
         }
 
-        archiveButton  = makeButton("archivebox",   "Archive")
-        deleteButton   = makeButton("trash",        "Delete")
-        markReadButton = makeButton("envelope.open", "Mark as Read")
-        starButton     = makeButton("star",         "Star")
-        moveButton     = makeButton("folder",       "Move to Folder")
+        archiveButton  = makeButton("archivebox",            "Archive")
+        deleteButton   = makeButton("trash",                 "Delete")
+        markReadButton = makeButton("envelope.open",         "Mark as Read")
+        starButton     = makeButton("star",                  "Star")
+        moveButton     = makeButton("folder",                "Move to Folder")
+        spamButton     = makeButton("exclamationmark.shield","Mark as Spam")
 
         // Spacer that pushes action buttons to the right
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
-        // Horizontal stack: [countLabel] [selectAll] [deselectAll] [spacer] [archive] [delete] [read] [star] [move]
+        // Horizontal stack: [countLabel] [selectAll] [deselectAll] [spacer] [archive] [delete] [read] [star] [move] [spam]
         stackView = NSStackView(views: [
             countLabel,
             selectAllButton,
@@ -89,6 +92,7 @@ final class BulkActionBar: NSView {
             markReadButton,
             starButton,
             moveButton,
+            spamButton,
         ])
         stackView.orientation = .horizontal
         stackView.alignment = .centerY
@@ -124,6 +128,7 @@ final class BulkActionBar: NSView {
         markReadButton.target = self;  markReadButton.action = #selector(markReadTapped)
         starButton.target     = self;  starButton.action     = #selector(starTapped)
         moveButton.target     = self;  moveButton.action     = #selector(moveTapped)
+        spamButton.target     = self;  spamButton.action     = #selector(spamTapped)
         selectAllButton.target = self;  selectAllButton.action = #selector(selectAllTapped)
         deselectButton.target = self;  deselectButton.action = #selector(deselectAllTapped)
 
@@ -174,6 +179,7 @@ final class BulkActionBar: NSView {
     @objc private func markReadTapped()   { onMarkRead?() }
     @objc private func starTapped()       { onStar?() }
     @objc private func moveTapped()       { onMove?() }
+    @objc private func spamTapped()       { onMarkSpam?() }
     @objc private func selectAllTapped()   { onSelectAll?() }
     @objc private func deselectAllTapped(){ onDeselectAll?() }
 }

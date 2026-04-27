@@ -189,6 +189,7 @@ actor MockDeleteProvider: MailProvider {
         if let e = nextError { throw e }
         calledRefs += messageRefs
     }
+    func markSpamBatch(messageRefs: [String]) async throws {}
     func send(message: OutgoingMessage) async throws {}
     func fetchAttachment(messageRef: String, partId: String) async throws -> Data { Data() }
     func startPushNotifications(onNewMessage: @escaping @Sendable () async -> Void) async throws {}

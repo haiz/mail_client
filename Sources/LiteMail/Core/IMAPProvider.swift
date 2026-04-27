@@ -482,6 +482,22 @@ actor IMAPProvider: MailProvider {
         return result
     }
 
+    func markSpamBatch(messageRefs: [String]) async throws {
+        guard !messageRefs.isEmpty else { return }
+        let imap = try await getIMAP()
+        let junk = resolveJunkFolderName()
+        for (folder, uids) in Self.groupRefsByFolder(messageRefs) {
+            if let folder { _ = try await imap.selectMailbox(folder) }
+            for uid in uids {
+                try await imap.move(message: uid, to: junk)
+            }
+        }
+    }
+
+    private func resolveJunkFolderName() -> String {
+        isGmail ? "[Gmail]/Spam" : "Junk"
+    }
+
     func fetchAttachment(messageRef: String, partId: String) async throws -> Data {
         let imap = try await getIMAP()
         let uid = Self.parseUidRef(messageRef)
@@ -598,7 +614,10 @@ actor IMAPProvider: MailProvider {
                     }
 
                     let swiftMailAttachments: [Attachment]? = message.attachments.isEmpty ? nil :
-                        message.attachments.map { Attachment(filename: $0.filename, mimeType: $0.mimeType, data: $0.data) }
+                        message.attachments.map {
+                            Attachment(filename: $0.filename, mimeType: $0.mimeType, data: $0.data,
+                                       contentID: $0.contentId, isInline: $0.isInline)
+                        }
                     let email = Email(
                         sender: EmailAddress(name: nil, address: from),
                         recipients: message.to.map { EmailAddress(name: nil, address: $0) },
@@ -629,8 +648,11 @@ actor IMAPProvider: MailProvider {
     // MARK: - Helpers
 
     /// Extract attachment metadata from MessageInfo parts and store in the DB.
+    /// Includes regular attachments (disposition=attachment) and inline images (has content-id).
     private func storeAttachmentMetadata(info: MessageInfo, emailId: Int64) async {
-        let attachmentParts = info.parts.filter { $0.disposition == "attachment" }
+        let attachmentParts = info.parts.filter {
+            $0.disposition == "attachment" || $0.contentId != nil
+        }
         guard !attachmentParts.isEmpty else { return }
 
         let records = attachmentParts.map { part in

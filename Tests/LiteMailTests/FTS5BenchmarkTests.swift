@@ -74,7 +74,8 @@ final class FTS5BenchmarkTests: XCTestCase {
                     isRead: index % 3 == 0,
                     isStarred: index % 10 == 0,
                     isDeleted: false,
-                    hasAttachments: index % 7 == 0
+                    hasAttachments: index % 7 == 0,
+                    accountId: "bench-account"
                 )
                 let id = try await store.insertEmail(record)
 

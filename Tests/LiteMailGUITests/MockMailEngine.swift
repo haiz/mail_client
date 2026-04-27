@@ -68,6 +68,29 @@ final class MockMailEngine: MailEngineProtocol, @unchecked Sendable {
     func fetchAttachmentData(emailId: Int64, partId: String) async throws -> Data { calls.append("fetchAttachmentData"); return attachmentData["\(emailId):\(partId)"] ?? Data() }
     func send(message: OutgoingMessage, fromAccountId: String) async throws { calls.append("send"); sendCalls.append((message, fromAccountId)) }
     func saveDraft(_ draft: OutgoingMessage, accountId: String) async throws { calls.append("saveDraft"); draftCalls.append((draft, accountId)) }
+    var signatures: [String: String] = [:]
+    func signature(accountId: String) async throws -> String? { calls.append("signature"); return signatures[accountId] }
+    func setSignature(accountId: String, html: String?) async throws { calls.append("setSignature"); signatures[accountId] = html }
+
+    // MARK: - Scheduled Send
+    private(set) var scheduleSendCalls: [(OutgoingMessage, String, Date)] = []
+    func scheduleSend(_ msg: OutgoingMessage, fromAccountId: String, sendAt: Date) async throws -> Int64 {
+        calls.append("scheduleSend"); scheduleSendCalls.append((msg, fromAccountId, sendAt)); return 0
+    }
+    func listScheduled(accountId: String) async throws -> [ScheduledMessage] { calls.append("listScheduled"); return [] }
+    func cancelScheduled(outboxId: Int64) async throws -> OutboxRecord? { calls.append("cancelScheduled"); return nil }
+
+    // MARK: - Snooze
+    private(set) var snoozeCalls: [(Int64, Date)] = []
+    private(set) var unsnoozeCalls: [Int64] = []
+    func snooze(emailId: Int64, until: Date) async throws { calls.append("snooze"); snoozeCalls.append((emailId, until)) }
+    func unsnooze(emailId: Int64) async throws { calls.append("unsnooze"); unsnoozeCalls.append(emailId) }
+    func listSnoozed(accountId: String) async throws -> [EmailHeader] { calls.append("listSnoozed"); return [] }
+
+    // MARK: - Spam
+    private(set) var markSpamCalls: [Int64] = []
+    func markSpam(emailId: Int64) async throws { calls.append("markSpam"); markSpamCalls.append(emailId) }
+    func markSpamBatch(emailIds: [Int64]) async throws { calls.append("markSpamBatch"); markSpamCalls.append(contentsOf: emailIds) }
 
     // MARK: - Batch Actions
     func deleteBatch(emailIds: [Int64]) async throws { calls.append("deleteBatch"); deleteBatchCalls.append(emailIds) }
@@ -75,4 +98,12 @@ final class MockMailEngine: MailEngineProtocol, @unchecked Sendable {
     func markReadBatch(emailIds: [Int64], read: Bool) async throws { calls.append("markReadBatch"); markReadBatchCalls.append((emailIds, read)) }
     func markStarredBatch(emailIds: [Int64], starred: Bool) async throws { calls.append("markStarredBatch"); markStarredBatchCalls.append((emailIds, starred)) }
     func moveBatch(emailIds: [Int64], toFolder: String) async throws { calls.append("moveBatch"); moveBatchCalls.append((emailIds, toFolder)) }
+
+    // MARK: - Saved Searches
+    func listSavedSearches(accountId: String?) async throws -> [MailStore.SavedSearchRecord] { [] }
+    func saveSearch(accountId: String?, name: String, query: String) async throws -> Int64 { 0 }
+    func deleteSavedSearch(id: Int64) async throws {}
+
+    // MARK: - Unified Inbox
+    func fetchUnifiedInbox(offset: Int, limit: Int) async throws -> [EmailHeader] { [] }
 }

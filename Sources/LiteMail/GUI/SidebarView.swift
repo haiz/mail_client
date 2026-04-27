@@ -29,6 +29,14 @@ final class SidebarView: NSObject {
     private var authErrorAccountIds: Set<String> = []
     /// Top-level items: system folder leaves + section headers with children
     private var mailboxes: [SidebarItem] = []
+    private var savedSearchItems: [SidebarItem] = []
+    /// Maps folderId → (id, query) for saved search items
+    private var savedSearchMeta: [String: (id: Int64, query: String)] = [:]
+
+    /// Called when a saved search is selected. Passes the raw query string.
+    var onSavedSearchSelected: ((String) -> Void)?
+    /// Called when user wants to delete a saved search. Passes the saved search id.
+    var onDeleteSavedSearch: ((Int64) -> Void)?
 
     override init() {
         // Custom account switcher card
@@ -166,7 +174,7 @@ final class SidebarView: NSObject {
                 role: folder.role
             )
             switch folder.role {
-            case .inbox, .sent, .drafts, .trash, .spam, .starred, .archive, .all:
+            case .inbox, .sent, .drafts, .trash, .spam, .starred, .archive, .all, .scheduled, .snoozed:
                 systemItems.append(item)
             case .category:
                 categoryItems.append(item)
@@ -175,8 +183,8 @@ final class SidebarView: NSObject {
             }
         }
 
-        // Sort system items by canonical Gmail order
-        let systemOrder: [FolderRole] = [.inbox, .starred, .sent, .drafts, .spam, .trash, .archive, .all]
+        // Sort system items by canonical order
+        let systemOrder: [FolderRole] = [.inbox, .starred, .sent, .drafts, .scheduled, .snoozed, .spam, .trash, .archive, .all]
         systemItems.sort {
             let i = systemOrder.firstIndex(of: $0.role ?? .all) ?? 99
             let j = systemOrder.firstIndex(of: $1.role ?? .all) ?? 99
@@ -186,12 +194,17 @@ final class SidebarView: NSObject {
         categoryItems.sort { $0.title < $1.title }
         labelItems.sort { $0.title < $1.title }
 
-        var items = systemItems
+        // Always prepend "All Inboxes" for multi-account unified view
+        let allInboxesItem = SidebarItem(title: "All Inboxes", icon: "tray.2.fill", folderId: "__unified__")
+        var items = [allInboxesItem] + systemItems
         if !categoryItems.isEmpty {
             items.append(SidebarItem(title: "Categories", children: categoryItems))
         }
         if !labelItems.isEmpty {
             items.append(SidebarItem(title: "Labels", children: labelItems))
+        }
+        if !savedSearchItems.isEmpty {
+            items.append(SidebarItem(title: "Saved", children: savedSearchItems))
         }
 
         // Preserve the user's current folder selection across reload.
@@ -211,6 +224,23 @@ final class SidebarView: NSObject {
         } else if let inboxRow = findRow(folderId: "INBOX") {
             outlineView.selectRowIndexes(IndexSet(integer: inboxRow), byExtendingSelection: false)
         }
+    }
+
+    /// Updates saved searches section. Pass an array of (id, name, query) tuples.
+    func updateSavedSearches(_ searches: [(id: Int64, name: String, query: String)]) {
+        savedSearchMeta = [:]
+        savedSearchItems = searches.map { s in
+            let fid = "__saved_search_\(s.id)__"
+            savedSearchMeta[fid] = (id: s.id, query: s.query)
+            return SidebarItem(title: s.name, icon: "magnifyingglass", folderId: fid)
+        }
+        // Remove any existing Saved section and re-add it
+        mailboxes.removeAll { $0.isSection && $0.title == "Saved" }
+        if !savedSearchItems.isEmpty {
+            mailboxes.append(SidebarItem(title: "Saved", children: savedSearchItems))
+        }
+        outlineView.reloadData()
+        outlineView.expandItem(nil, expandChildren: true)
     }
 
     /// Marks or clears the auth-error badge for the given account.
@@ -280,11 +310,14 @@ final class SidebarView: NSObject {
     // MARK: - Defaults
 
     private func loadDefaultMailboxes() {
-        let defaults: [(String, String, String, FolderRole)] = [
+        let defaults: [(String, String, String, FolderRole?)] = [
+            ("All Inboxes", "tray.2.fill", "__unified__", nil),
             ("Inbox", "tray.fill", "INBOX", .inbox),
             ("Starred", "star.fill", "[Gmail]/Starred", .starred),
             ("Sent", "paperplane.fill", "[Gmail]/Sent Mail", .sent),
             ("Drafts", "doc.text.fill", "[Gmail]/Drafts", .drafts),
+            ("Scheduled", "clock.badge", "__scheduled__", .scheduled),
+            ("Snoozed", "alarm.fill", "__snoozed__", .snoozed),
             ("Trash", "trash.fill", "[Gmail]/Trash", .trash),
         ]
         mailboxes = defaults.map { SidebarItem(title: $0.0, icon: $0.1, folderId: $0.2, role: $0.3) }
@@ -307,7 +340,9 @@ final class SidebarView: NSObject {
         case .sent:    return "paperplane.fill"
         case .drafts:  return "doc.text.fill"
         case .trash:   return "trash.fill"
-        case .spam:    return "xmark.bin.fill"
+        case .spam:      return "xmark.bin.fill"
+        case .scheduled: return "clock.badge"
+        case .snoozed:   return "alarm.fill"
         case .archive, .all: return "archivebox.fill"
         case .category: return Self.iconForCategory(folderId)
         case nil:
@@ -481,6 +516,16 @@ extension SidebarView: NSOutlineViewDelegate {
         let row = outlineView.selectedRow
         guard row >= 0, let item = outlineView.item(atRow: row) as? SidebarItem,
               !item.isSection, let folderId = item.folderId else { return }
+        if folderId.hasPrefix("__saved_search_") {
+            if let meta = savedSearchMeta[folderId] {
+                onSavedSearchSelected?(meta.query)
+            }
+            return
+        }
+        if folderId == "__unified__" {
+            onAccountSwitched?("__unified__")
+            return
+        }
         let accountId = item.accountId ?? currentAccountId ?? "default"
         onFolderSelected?(accountId, folderId)
     }

@@ -7,6 +7,7 @@ struct UndoableBatchAction {
     let reverseOperation: @Sendable () async throws -> Void
     let emailIds: [Int64]
     var isUndone: Bool = false
+    var countdown: Int = 10
 }
 
 // MARK: - UndoToastView
@@ -243,7 +244,7 @@ private final class UndoToastCard: NSView {
 
     func startCountdown() {
         stop()
-        secondsRemaining = 10
+        secondsRemaining = max(1, action.countdown)
         updateLabel()
         resetProgressBar()
         countdownTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
@@ -312,7 +313,8 @@ private final class UndoToastCard: NSView {
     }
 
     private func animateProgress() {
-        let fraction = CGFloat(secondsRemaining) / 10.0
+        let total = CGFloat(max(1, action.countdown))
+        let fraction = CGFloat(secondsRemaining) / total
         progressWidthConstraint?.isActive = false
         let newConstraint = progressBar.widthAnchor.constraint(equalTo: widthAnchor, multiplier: max(fraction, 0))
         newConstraint.isActive = true

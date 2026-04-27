@@ -167,8 +167,10 @@ final class CommandPalette: NSObject {
             PaletteCommand(title: "Toggle star", shortcut: "S", action: .toggleStar(0)),
             PaletteCommand(title: "Compose new email", shortcut: "\u{2318}N", action: .compose),
             PaletteCommand(title: "Reply", shortcut: "\u{2318}R", action: .reply(0)),
+            PaletteCommand(title: "Reply All", shortcut: "\u{21E7}\u{2318}R", action: .replyAll(0)),
             PaletteCommand(title: "Forward", shortcut: "\u{2318}F", action: .forward(0)),
             PaletteCommand(title: "Refresh inbox", shortcut: "\u{2318}\u{21E7}R", action: .refresh),
+            PaletteCommand(title: "Mark as Spam", shortcut: "", action: .markSpam(0)),
         ]
     }
 

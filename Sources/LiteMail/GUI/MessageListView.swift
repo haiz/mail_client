@@ -50,6 +50,28 @@ final class MessageListView: NSObject {
     let bulkActionBar = BulkActionBar()
     private var bulkBarHeightConstraint: NSLayoutConstraint!
 
+    // Search chip bar — shows parsed operator chips below search field
+    private let chipBar = NSStackView()
+    private var chipBarHeightConstraint: NSLayoutConstraint!
+    private var activeChips: [String] = []
+
+    var onSaveSearch: ((String) -> Void)?
+
+    // Keyboard navigation callbacks
+    var onArchiveSelected: (() -> Void)?
+    var onDeleteSelected: (() -> Void)?
+    var onReplySelected: (() -> Void)?
+    var onReplyAllSelected: (() -> Void)?
+    var onForwardSelected: (() -> Void)?
+    var onToggleStarSelected: (() -> Void)?
+    var onMarkSpamSelected: (() -> Void)?
+    var onMarkUnreadSelected: (() -> Void)?
+    var onFolderShortcut: ((ShortcutAction) -> Void)?
+
+    private var keyMonitorToken: Any?
+    private var chordPrefix: String?
+    private var chordClearTask: DispatchWorkItem?
+
     var onMessageSelected: ((EmailHeader) -> Void)?
     var onSearchChanged: ((String) -> Void)?
     var onCheckedIdsChanged: ((Set<Int64>) -> Void)?
@@ -119,15 +141,23 @@ final class MessageListView: NSObject {
         scrollView.autohidesScrollers = true
         scrollView.translatesAutoresizingMaskIntoConstraints = false
 
+        // Chip bar — horizontal stack of operator pills, hidden when empty
+        chipBar.orientation = .horizontal
+        chipBar.spacing = 4
+        chipBar.edgeInsets = NSEdgeInsets(top: 2, left: 8, bottom: 2, right: 8)
+        chipBar.translatesAutoresizingMaskIntoConstraints = false
+
         // Container
         let container = NSView()
         bulkActionBar.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(searchField)
+        container.addSubview(chipBar)
         container.addSubview(bulkActionBar)
         container.addSubview(scrollView)
 
         // BulkActionBar height: 0 when hidden, 36 when visible
         bulkBarHeightConstraint = bulkActionBar.heightAnchor.constraint(equalToConstant: 0)
+        chipBarHeightConstraint = chipBar.heightAnchor.constraint(equalToConstant: 0)
 
         NSLayoutConstraint.activate([
             searchField.topAnchor.constraint(equalTo: container.topAnchor, constant: 8),
@@ -135,7 +165,12 @@ final class MessageListView: NSObject {
             searchField.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
             searchField.heightAnchor.constraint(equalToConstant: 28),
 
-            bulkActionBar.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 4),
+            chipBar.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 2),
+            chipBar.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            chipBar.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            chipBarHeightConstraint,
+
+            bulkActionBar.topAnchor.constraint(equalTo: chipBar.bottomAnchor, constant: 2),
             bulkActionBar.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             bulkActionBar.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             bulkBarHeightConstraint,
@@ -168,10 +203,89 @@ final class MessageListView: NSObject {
         )
 
         setupEmptyState(in: container)
+        setupKeyboardMonitor()
     }
 
     deinit {
         NotificationCenter.default.removeObserver(self)
+        if let token = keyMonitorToken {
+            NSEvent.removeMonitor(token)
+        }
+    }
+
+    private func setupKeyboardMonitor() {
+        keyMonitorToken = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self else { return event }
+            // Skip when any text input is first responder
+            if let fr = event.window?.firstResponder {
+                if fr is NSText || fr is NSTextField || fr is NSSearchField { return event }
+                // Skip WKWebView's internal text responders
+                let frClass = String(describing: type(of: fr))
+                if frClass.contains("WKWebView") || frClass.contains("WKContent") { return event }
+            }
+            return self.handleKeyEvent(event)
+        }
+    }
+
+    private func handleKeyEvent(_ event: NSEvent) -> NSEvent? {
+        let action = KeyboardShortcuts.match(event: event, pendingPrefix: &chordPrefix)
+
+        // If we just set a chord prefix, schedule a clear after 1.2 s
+        if chordPrefix != nil {
+            chordClearTask?.cancel()
+            let task = DispatchWorkItem { [weak self] in self?.chordPrefix = nil }
+            chordClearTask = task
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2, execute: task)
+            return nil
+        }
+
+        guard let action else { return event }
+
+        switch action {
+        case .nextMessage:
+            selectAdjacentRow(delta: +1)
+        case .prevMessage:
+            selectAdjacentRow(delta: -1)
+        case .openMessage:
+            if let header = selectedHeader { onMessageSelected?(header) }
+        case .archive:
+            onArchiveSelected?()
+        case .delete:
+            onDeleteSelected?()
+        case .reply:
+            onReplySelected?()
+        case .replyAll:
+            onReplyAllSelected?()
+        case .forward:
+            onForwardSelected?()
+        case .toggleStar:
+            onToggleStarSelected?()
+        case .markSpam:
+            onMarkSpamSelected?()
+        case .markUnread:
+            onMarkUnreadSelected?()
+        case .focusSearch:
+            searchField.window?.makeFirstResponder(searchField)
+        case .showCheatSheet:
+            KeyboardCheatSheetWindow.shared.toggle()
+        case .gotoInbox, .gotoSent, .gotoAll:
+            onFolderShortcut?(action)
+        }
+        return nil
+    }
+
+    private func selectAdjacentRow(delta: Int) {
+        let count = tableView.numberOfRows
+        guard count > 0 else { return }
+        let current = tableView.selectedRow
+        let next: Int
+        if current < 0 {
+            next = delta > 0 ? 0 : count - 1
+        } else {
+            next = max(0, min(count - 1, current + delta))
+        }
+        tableView.selectRowIndexes(IndexSet(integer: next), byExtendingSelection: false)
+        tableView.scrollRowToVisible(next)
     }
 
     @objc private func scrollViewDidScroll() {
@@ -385,7 +499,48 @@ final class MessageListView: NSObject {
     }
 
     @objc private func searchFieldChanged() {
-        onSearchChanged?(searchField.stringValue)
+        let raw = searchField.stringValue
+        updateChipBar(for: raw)
+        onSearchChanged?(raw)
+    }
+
+    private func updateChipBar(for query: String) {
+        let parsed = SearchQueryParser.parse(query)
+        activeChips = parsed.chips
+        chipBar.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        if activeChips.isEmpty {
+            chipBarHeightConstraint.constant = 0
+            return
+        }
+        for chip in activeChips {
+            chipBar.addArrangedSubview(makeChipView(chip))
+        }
+        // "Save search" button at the trailing end
+        let saveBtn = NSButton(title: "Save", target: self, action: #selector(saveSearchTapped))
+        saveBtn.bezelStyle = .inline
+        saveBtn.controlSize = .mini
+        saveBtn.font = .systemFont(ofSize: 11)
+        chipBar.addArrangedSubview(saveBtn)
+        chipBarHeightConstraint.constant = 24
+    }
+
+    private func makeChipView(_ text: String) -> NSView {
+        let label = NSTextField(labelWithString: text)
+        label.font = .systemFont(ofSize: 11)
+        label.textColor = .controlTextColor
+        label.backgroundColor = .controlBackgroundColor
+        label.drawsBackground = true
+        label.isBezeled = false
+        label.wantsLayer = true
+        label.layer?.cornerRadius = 4
+        label.layer?.borderWidth = 0.5
+        label.layer?.borderColor = NSColor.separatorColor.cgColor
+        label.setContentHuggingPriority(.required, for: .horizontal)
+        return label
+    }
+
+    @objc private func saveSearchTapped() {
+        onSaveSearch?(searchField.stringValue)
     }
 }
 

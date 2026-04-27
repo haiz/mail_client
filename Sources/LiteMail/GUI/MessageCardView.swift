@@ -1,6 +1,70 @@
 import AppKit
 import WebKit
 
+/// Handles `cid:` URL scheme requests from WKWebView for inline email images.
+/// Lazily fetches attachment data on first request and caches the result.
+private final class CidSchemeHandler: NSObject, WKURLSchemeHandler, @unchecked Sendable {
+    /// Maps content-id string → (emailId, partId) for lazy fetching.
+    var contentIdToPartId: [String: (emailId: Int64, partId: String)] = [:]
+    var cachedData: [String: Data] = [:]
+    var fetchData: ((Int64, String) async throws -> Data)?
+
+    private var stoppedTaskIds: Set<ObjectIdentifier> = []
+
+    func webView(_ webView: WKWebView, start urlSchemeTask: any WKURLSchemeTask) {
+        let taskId = ObjectIdentifier(urlSchemeTask as AnyObject)
+        guard let url = urlSchemeTask.request.url else {
+            urlSchemeTask.didFailWithError(URLError(.badURL))
+            return
+        }
+        let rawCid = url.absoluteString
+        let cid = (rawCid.hasPrefix("cid:") ? String(rawCid.dropFirst(4)) : rawCid)
+            .removingPercentEncoding ?? rawCid
+
+        if let data = cachedData[cid] {
+            guard !stoppedTaskIds.contains(taskId) else { return }
+            serveData(data, url: url, task: urlSchemeTask)
+            return
+        }
+        guard let info = contentIdToPartId[cid], let fetch = fetchData else {
+            urlSchemeTask.didFailWithError(URLError(.fileDoesNotExist))
+            return
+        }
+        Task { @MainActor [weak self] in
+            guard let self, !self.stoppedTaskIds.contains(taskId) else { return }
+            do {
+                let data = try await fetch(info.emailId, info.partId)
+                guard !self.stoppedTaskIds.contains(taskId) else { return }
+                self.cachedData[cid] = data
+                self.serveData(data, url: url, task: urlSchemeTask)
+            } catch {
+                guard !self.stoppedTaskIds.contains(taskId) else { return }
+                urlSchemeTask.didFailWithError(error)
+            }
+            self.stoppedTaskIds.remove(taskId)
+        }
+    }
+
+    func webView(_ webView: WKWebView, stop urlSchemeTask: any WKURLSchemeTask) {
+        stoppedTaskIds.insert(ObjectIdentifier(urlSchemeTask as AnyObject))
+    }
+
+    private func serveData(_ data: Data, url: URL, task: any WKURLSchemeTask) {
+        let mime: String
+        if data.prefix(4) == Data([0x89, 0x50, 0x4E, 0x47]) { mime = "image/png" }
+        else if data.prefix(2) == Data([0xFF, 0xD8]) { mime = "image/jpeg" }
+        else if data.prefix(6) == Data("GIF89a".utf8) || data.prefix(6) == Data("GIF87a".utf8) { mime = "image/gif" }
+        else { mime = "image/jpeg" }
+
+        let response = URLResponse(url: url, mimeType: mime,
+                                   expectedContentLength: data.count,
+                                   textEncodingName: nil)
+        task.didReceive(response)
+        task.didReceive(data)
+        task.didFinish()
+    }
+}
+
 /// NSView subclass that accepts first responder for keyboard navigation
 /// and forwards Enter/Space to the card's toggle-expand handler.
 private final class MessageCardContainerView: NSView {
@@ -29,6 +93,9 @@ final class MessageCardView: NSObject {
     /// The email ID this card displays.
     var emailId: Int64 { header.id }
 
+    /// The full header for this card (used by ThreadDetailView for keyboard-shortcut reply).
+    var messageHeader: EmailHeader { header }
+
     // Collapsed state views
     private let avatarCircle = NSView()
     private let avatarLabel = NSTextField(labelWithString: "")
@@ -55,23 +122,48 @@ final class MessageCardView: NSObject {
     private let replyButton: NSButton
     private let moreButton: NSButton
 
+    // Loading spinner
+    private let loadingSpinner = NSProgressIndicator()
+
+    // vCard / iCal preview container (added lazily above attachment bar)
+    private var attachmentPreviewContainer: NSView?
+
+    // Remote-image blocking banner
+    private let imageBlockedBanner = NSView()
+    private let imageBlockedLabel = NSTextField(labelWithString: "Images blocked for privacy.")
+    private let showOnceButton: NSButton
+    private let alwaysAllowButton: NSButton
+    private var lastBlockedCount = 0
+
     // Body cache
     private(set) var cachedBody: EmailBody?
     private var isLoadingBody = false
+
+    // Per-card body rendering override (nil = use global preference)
+    private var renderingOverride: BodyRendering?
 
     // Height constraint for expand/collapse animation
     private var collapsedHeightConstraint: NSLayoutConstraint!
     private var expandedTopConstraint: NSLayoutConstraint!
 
+    // cid: inline-image handler (one per card, reused across webview recreations)
+    private let cidHandler = CidSchemeHandler()
+
     // Callbacks
     var onToggleExpand: (() -> Void)?
     var onReply: ((EmailHeader, EmailBody?) -> Void)?
+    var onReplyAll: ((EmailHeader, EmailBody?) -> Void)?
     var onForward: ((EmailHeader, EmailBody?) -> Void)?
     var onArchive: ((Int64) -> Void)?
     var onDelete: ((Int64) -> Void)?
+    var onMarkSpam: ((Int64) -> Void)?
     var onMove: ((Int64, String) -> Void)?
+    var onSnooze: ((Int64, Date) -> Void)?
     var onDownloadAttachment: ((AttachmentInfo) -> Void)?
     var onRequestBody: ((Int64) -> Void)?
+    var onFetchAttachmentData: ((Int64, String) async throws -> Data)?
+    var onAllowImages: ((String) -> Void)?
+    var onShowLabelPicker: ((NSView, Int64) -> Void)?
 
     /// Available folders for the Move menu.
     var availableFolders: [MailFolder] = []
@@ -142,7 +234,20 @@ final class MessageCardView: NSObject {
             btn.heightAnchor.constraint(equalToConstant: 28).isActive = true
         }
 
+        showOnceButton = CursorButton(title: "Show Images", target: nil, action: nil)
+        showOnceButton.bezelStyle = .inline
+        showOnceButton.font = .systemFont(ofSize: 11)
+
+        alwaysAllowButton = CursorButton(title: "Always show from sender", target: nil, action: nil)
+        alwaysAllowButton.bezelStyle = .inline
+        alwaysAllowButton.font = .systemFont(ofSize: 11)
+
         super.init()
+
+        cidHandler.fetchData = { [weak self] emailId, partId in
+            guard let fetch = self?.onFetchAttachmentData else { throw URLError(.fileDoesNotExist) }
+            return try await fetch(emailId, partId)
+        }
 
         replyButton.target = self
         replyButton.action = #selector(replyClicked)
@@ -248,14 +353,51 @@ final class MessageCardView: NSObject {
         }
         headerContainer.translatesAutoresizingMaskIntoConstraints = false
 
+        // Image blocked banner
+        imageBlockedBanner.translatesAutoresizingMaskIntoConstraints = false
+        imageBlockedBanner.isHidden = true
+
+        imageBlockedLabel.font = .systemFont(ofSize: 11)
+        imageBlockedLabel.textColor = .secondaryLabelColor
+        imageBlockedLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        showOnceButton.translatesAutoresizingMaskIntoConstraints = false
+        showOnceButton.target = self
+        showOnceButton.action = #selector(showImagesOnce)
+
+        alwaysAllowButton.translatesAutoresizingMaskIntoConstraints = false
+        alwaysAllowButton.target = self
+        alwaysAllowButton.action = #selector(alwaysAllowImages)
+
+        imageBlockedBanner.addSubview(imageBlockedLabel)
+        imageBlockedBanner.addSubview(showOnceButton)
+        imageBlockedBanner.addSubview(alwaysAllowButton)
+
+        NSLayoutConstraint.activate([
+            imageBlockedLabel.leadingAnchor.constraint(equalTo: imageBlockedBanner.leadingAnchor),
+            imageBlockedLabel.centerYAnchor.constraint(equalTo: imageBlockedBanner.centerYAnchor),
+
+            showOnceButton.leadingAnchor.constraint(equalTo: imageBlockedLabel.trailingAnchor, constant: 8),
+            showOnceButton.centerYAnchor.constraint(equalTo: imageBlockedBanner.centerYAnchor),
+
+            alwaysAllowButton.leadingAnchor.constraint(equalTo: showOnceButton.trailingAnchor, constant: 4),
+            alwaysAllowButton.centerYAnchor.constraint(equalTo: imageBlockedBanner.centerYAnchor),
+
+            imageBlockedBanner.heightAnchor.constraint(equalToConstant: 28),
+        ])
+
         // headerContainer + remaining views go into expandedContainer
-        let containerViews: [NSView] = [headerContainer, headerSeparator, attachmentBar, bodyScrollView, actionBar]
+        let containerViews: [NSView] = [headerContainer, headerSeparator, attachmentBar, imageBlockedBanner, bodyScrollView, actionBar, loadingSpinner]
         for v in containerViews {
             v.translatesAutoresizingMaskIntoConstraints = false
             expandedContainer.addSubview(v)
         }
         expandedContainer.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(expandedContainer)
+
+        loadingSpinner.style = .spinning
+        loadingSpinner.controlSize = .small
+        loadingSpinner.isHidden = true
 
         expAvatarLabel.font = .systemFont(ofSize: 15, weight: .semibold)
         expAvatarLabel.alignment = .center
@@ -316,7 +458,7 @@ final class MessageCardView: NSObject {
             expSenderLabel.trailingAnchor.constraint(lessThanOrEqualTo: expDateLabel.leadingAnchor, constant: -12),
 
             expDateLabel.centerYAnchor.constraint(equalTo: expSenderLabel.centerYAnchor),
-            expDateLabel.trailingAnchor.constraint(equalTo: headerContainer.trailingAnchor, constant: -12),
+            expDateLabel.trailingAnchor.constraint(equalTo: actionBar.leadingAnchor, constant: -8),
 
             expRecipientLabel.topAnchor.constraint(equalTo: expSenderLabel.bottomAnchor, constant: 2),
             expRecipientLabel.leadingAnchor.constraint(equalTo: expSenderLabel.leadingAnchor),
@@ -331,13 +473,22 @@ final class MessageCardView: NSObject {
             attachmentBar.leadingAnchor.constraint(equalTo: expandedContainer.leadingAnchor, constant: 12),
             attachmentBar.trailingAnchor.constraint(lessThanOrEqualTo: expandedContainer.trailingAnchor, constant: -12),
 
-            bodyScrollView.topAnchor.constraint(equalTo: attachmentBar.bottomAnchor, constant: 8),
+            imageBlockedBanner.topAnchor.constraint(equalTo: attachmentBar.bottomAnchor, constant: 4),
+            imageBlockedBanner.leadingAnchor.constraint(equalTo: expandedContainer.leadingAnchor, constant: 12),
+            imageBlockedBanner.trailingAnchor.constraint(lessThanOrEqualTo: expandedContainer.trailingAnchor, constant: -12),
+
+            bodyScrollView.topAnchor.constraint(equalTo: imageBlockedBanner.bottomAnchor, constant: 4),
             bodyScrollView.leadingAnchor.constraint(equalTo: expandedContainer.leadingAnchor, constant: 12),
             bodyScrollView.trailingAnchor.constraint(equalTo: expandedContainer.trailingAnchor, constant: -12),
+            bodyScrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 200),
+            bodyScrollView.bottomAnchor.constraint(equalTo: expandedContainer.bottomAnchor, constant: -8),
 
-            actionBar.topAnchor.constraint(equalTo: bodyScrollView.bottomAnchor, constant: 8),
+            // actionBar overlays the header row at sender-label height
+            actionBar.centerYAnchor.constraint(equalTo: expSenderLabel.centerYAnchor),
             actionBar.trailingAnchor.constraint(equalTo: expandedContainer.trailingAnchor, constant: -12),
-            actionBar.bottomAnchor.constraint(equalTo: expandedContainer.bottomAnchor, constant: -8),
+
+            loadingSpinner.topAnchor.constraint(equalTo: headerSeparator.bottomAnchor, constant: 20),
+            loadingSpinner.centerXAnchor.constraint(equalTo: expandedContainer.centerXAnchor),
         ])
     }
 
@@ -415,18 +566,52 @@ final class MessageCardView: NSObject {
     func displayBody(_ body: EmailBody?) {
         cachedBody = body
         isLoadingBody = false
+        loadingSpinner.stopAnimation(nil)
+        loadingSpinner.isHidden = true
 
-        if let htmlBody = body?.htmlBody, !htmlBody.isEmpty {
+        renderCurrentBody()
+    }
+
+    private func renderCurrentBody() {
+        let body = cachedBody
+        let effective = renderingOverride ?? DisplayPreferences.bodyRendering
+        let hasHtml = !(body?.htmlBody ?? "").isEmpty
+        let hasText = !(body?.textBody ?? "").isEmpty
+
+        let showHtml: Bool
+        switch effective {
+        case .html: showHtml = hasHtml
+        case .plain: showHtml = false
+        case .auto: showHtml = hasHtml
+        }
+
+        if showHtml, let htmlBody = body?.htmlBody {
             bodyTextView.isHidden = true
             bodyScrollView.isHidden = true
-            showWebView(html: htmlBody)
-        } else if let textBody = body?.textBody, !textBody.isEmpty {
+            let shouldBlock = DisplayPreferences.remoteImagePolicy != .allowAll
+            let (sanitized, blockedCount) = RemoteImageSanitizer.sanitize(htmlBody, blockImages: shouldBlock)
+            lastBlockedCount = blockedCount
+            imageBlockedBanner.isHidden = blockedCount == 0
+            showWebView(html: sanitized)
+        } else if hasText, let textBody = body?.textBody {
             hideWebView()
+            imageBlockedBanner.isHidden = true
             bodyTextView.isHidden = false
             bodyScrollView.isHidden = false
             bodyTextView.textStorage?.setAttributedString(Self.renderPlainText(textBody))
+        } else if hasHtml, let htmlBody = body?.htmlBody {
+            // Plain preference but no text body — strip HTML tags to plain
+            let stripped = NSAttributedString(html: htmlBody.data(using: .utf8) ?? Data(),
+                                              options: [.documentType: NSAttributedString.DocumentType.html],
+                                              documentAttributes: nil)?.string ?? "(no content)"
+            hideWebView()
+            imageBlockedBanner.isHidden = true
+            bodyTextView.isHidden = false
+            bodyScrollView.isHidden = false
+            bodyTextView.textStorage?.setAttributedString(Self.renderPlainText(stripped))
         } else {
             hideWebView()
+            imageBlockedBanner.isHidden = true
             bodyTextView.isHidden = false
             bodyScrollView.isHidden = false
             bodyTextView.textStorage?.setAttributedString(Self.renderPlainText("(no content)"))
@@ -436,27 +621,67 @@ final class MessageCardView: NSObject {
     func showLoading() {
         isLoadingBody = true
         hideWebView()
-        bodyTextView.isHidden = false
-        bodyScrollView.isHidden = false
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 14),
-            .foregroundColor: NSColor.tertiaryLabelColor,
-        ]
-        bodyTextView.textStorage?.setAttributedString(NSAttributedString(string: "Loading\u{2026}", attributes: attrs))
+        bodyTextView.isHidden = true
+        bodyScrollView.isHidden = true
+        loadingSpinner.isHidden = false
+        loadingSpinner.startAnimation(nil)
     }
 
     // MARK: - Attachments
 
     func displayAttachments(_ attachments: [AttachmentInfo]) {
         currentAttachments = attachments
+
+        // Remove any old preview
+        attachmentPreviewContainer?.removeFromSuperview()
+        attachmentPreviewContainer = nil
+
+        // Register inline attachments with the cid: handler for WKWebView rendering.
+        let emailId = header.id
+        for att in attachments where att.isInline {
+            if let cid = att.contentId {
+                cidHandler.contentIdToPartId[cid] = (emailId: emailId, partId: att.partId)
+            }
+        }
+
+        // Trigger vCard / iCal preview for supported attachments (async)
+        for att in attachments where !att.isInline {
+            let mime = att.mimeType?.lowercased() ?? ""
+            let filename = att.filename?.lowercased() ?? ""
+            let isVCard = mime == "text/vcard" || mime == "text/x-vcard" || filename.hasSuffix(".vcf")
+            let isICS = mime == "text/calendar" || filename.hasSuffix(".ics")
+            if isVCard || isICS, let fetch = onFetchAttachmentData {
+                let partId = att.partId
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    guard let data = try? await fetch(emailId, partId) else { return }
+                    let preview: NSView?
+                    if isVCard {
+                        let cards = VCardParser.parse(data)
+                        preview = cards.isEmpty ? nil : Self.buildVCardPreview(cards.first!)
+                    } else {
+                        let events = ICSParser.parse(data)
+                        preview = events.isEmpty ? nil : Self.buildICSPreview(events.first!)
+                    }
+                    if let preview {
+                        self.insertAttachmentPreview(preview)
+                    }
+                }
+                break  // preview first qualifying attachment only
+            }
+        }
+
+        // Only show chips for regular (non-inline) attachments.
+        // Use original indices into currentAttachments so attachmentChipClicked works.
         attachmentBar.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        guard !attachments.isEmpty else {
+        let hasRegular = attachments.contains { !$0.isInline }
+        guard hasRegular else {
             attachmentBar.isHidden = true
             return
         }
         attachmentBar.isHidden = false
 
-        for (index, att) in attachments.enumerated() {
+        for (index, att) in attachments.enumerated() where !att.isInline {
             let icon = NSImage(systemSymbolName: "paperclip", accessibilityDescription: nil) ?? NSImage()
             let name = att.filename ?? "Attachment"
             let sizeStr = att.sizeBytes.map { Self.formatFileSize($0) } ?? ""
@@ -480,6 +705,9 @@ final class MessageCardView: NSObject {
 
     @objc private func moreClicked() {
         let menu = NSMenu()
+        let replyAllItem = NSMenuItem(title: "Reply All", action: #selector(replyAllClicked), keyEquivalent: "")
+        replyAllItem.target = self
+        menu.addItem(replyAllItem)
         let forwardItem = NSMenuItem(title: "Forward", action: #selector(forwardClicked), keyEquivalent: "")
         forwardItem.target = self
         menu.addItem(forwardItem)
@@ -493,6 +721,37 @@ final class MessageCardView: NSObject {
         let deleteItem = NSMenuItem(title: "Delete", action: #selector(deleteClicked), keyEquivalent: "")
         deleteItem.target = self
         menu.addItem(deleteItem)
+
+        let spamItem = NSMenuItem(title: "Mark as Spam", action: #selector(markSpamClicked), keyEquivalent: "")
+        spamItem.target = self
+        menu.addItem(spamItem)
+
+        menu.addItem(.separator())
+
+        let labelsItem = NSMenuItem(title: "Labels...", action: #selector(labelsClicked), keyEquivalent: "")
+        labelsItem.target = self
+        menu.addItem(labelsItem)
+
+        let snoozeItem = NSMenuItem(title: "Snooze", action: nil, keyEquivalent: "")
+        let snoozeMenu = NSMenu()
+        for (title, date) in Self.snoozeOptions() {
+            let item = NSMenuItem(title: title, action: #selector(snoozeClicked(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = date
+            snoozeMenu.addItem(item)
+        }
+        snoozeItem.submenu = snoozeMenu
+        menu.addItem(snoozeItem)
+
+        menu.addItem(.separator())
+
+        let currentlyHTML = (renderingOverride == nil || renderingOverride == .html || renderingOverride == .auto)
+            && !(cachedBody?.htmlBody ?? "").isEmpty
+        let toggleTitle = currentlyHTML ? "View as Plain Text" : "View as HTML"
+        let toggleAction = currentlyHTML ? #selector(switchToPlainText) : #selector(switchToHTML)
+        let toggleItem = NSMenuItem(title: toggleTitle, action: toggleAction, keyEquivalent: "")
+        toggleItem.target = self
+        menu.addItem(toggleItem)
 
         if !availableFolders.isEmpty {
             let moveItem = NSMenuItem(title: "Move to...", action: nil, keyEquivalent: "")
@@ -510,13 +769,176 @@ final class MessageCardView: NSObject {
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: moreButton.bounds.height), in: moreButton)
     }
 
+    @objc private func replyAllClicked() { onReplyAll?(header, cachedBody) }
     @objc private func forwardClicked() { onForward?(header, cachedBody) }
     @objc private func archiveClicked() { onArchive?(header.id) }
     @objc private func deleteClicked() { onDelete?(header.id) }
+    @objc private func markSpamClicked() { onMarkSpam?(header.id) }
+
+    @objc private func showImagesOnce() {
+        guard let html = cachedBody?.htmlBody else { return }
+        imageBlockedBanner.isHidden = true
+        showWebView(html: html)
+    }
+
+    @objc private func alwaysAllowImages() {
+        onAllowImages?(header.senderEmail)
+        showImagesOnce()
+    }
+
+    @objc private func switchToPlainText() {
+        renderingOverride = .plain
+        renderCurrentBody()
+    }
+
+    @objc private func switchToHTML() {
+        renderingOverride = .html
+        renderCurrentBody()
+    }
+
+    @objc private func labelsClicked() {
+        onShowLabelPicker?(moreButton, header.id)
+    }
+
+    @objc private func snoozeClicked(_ sender: NSMenuItem) {
+        guard let date = sender.representedObject as? Date else { return }
+        onSnooze?(header.id, date)
+    }
+
+    private static func snoozeOptions() -> [(String, Date)] {
+        var cal = Calendar.current
+        cal.locale = Locale.current
+        let now = Date()
+        var options: [(String, Date)] = []
+
+        // Later today (3h)
+        options.append(("Later today (3h)", now.addingTimeInterval(3 * 3600)))
+
+        // Tomorrow 8am
+        if let tomorrow = cal.date(byAdding: .day, value: 1, to: now),
+           let tomorrow8am = cal.date(bySettingHour: 8, minute: 0, second: 0, of: tomorrow) {
+            options.append(("Tomorrow 8am", tomorrow8am))
+        }
+
+        // This weekend (Saturday 9am)
+        let weekday = cal.component(.weekday, from: now) // 1=Sun, 7=Sat
+        let daysToSat = weekday == 7 ? 7 : (7 - weekday)
+        if let sat = cal.date(byAdding: .day, value: daysToSat, to: now),
+           let sat9am = cal.date(bySettingHour: 9, minute: 0, second: 0, of: sat) {
+            options.append(("This weekend (Sat 9am)", sat9am))
+        }
+
+        // Next week (Monday 8am)
+        let daysToMon = weekday == 2 ? 7 : ((9 - weekday) % 7)
+        if let mon = cal.date(byAdding: .day, value: daysToMon, to: now),
+           let mon8am = cal.date(bySettingHour: 8, minute: 0, second: 0, of: mon) {
+            options.append(("Next week (Mon 8am)", mon8am))
+        }
+
+        return options
+    }
 
     @objc private func moveFolderSelected(_ sender: NSMenuItem) {
         guard let folderId = sender.representedObject as? String else { return }
         onMove?(header.id, folderId)
+    }
+
+    // MARK: - Attachment preview (vCard / iCal)
+
+    private func insertAttachmentPreview(_ preview: NSView) {
+        attachmentPreviewContainer?.removeFromSuperview()
+        attachmentPreviewContainer = preview
+        preview.translatesAutoresizingMaskIntoConstraints = false
+        expandedContainer.addSubview(preview)
+        NSLayoutConstraint.activate([
+            preview.topAnchor.constraint(equalTo: headerSeparator.bottomAnchor, constant: 8),
+            preview.leadingAnchor.constraint(equalTo: expandedContainer.leadingAnchor, constant: 12),
+            preview.trailingAnchor.constraint(lessThanOrEqualTo: expandedContainer.trailingAnchor, constant: -12),
+        ])
+    }
+
+    private static func buildVCardPreview(_ card: VCard) -> NSView {
+        let container = NSView()
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 2
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        func makeLabel(_ text: String, font: NSFont, color: NSColor = .labelColor) -> NSTextField {
+            let f = NSTextField(labelWithString: text)
+            f.font = font
+            f.textColor = color
+            return f
+        }
+
+        if let name = card.fn { stack.addArrangedSubview(makeLabel(name, font: .systemFont(ofSize: 13, weight: .semibold))) }
+        if let org = card.org { stack.addArrangedSubview(makeLabel(org, font: .systemFont(ofSize: 12), color: .secondaryLabelColor)) }
+        for email in card.emails { stack.addArrangedSubview(makeLabel(email, font: .systemFont(ofSize: 12), color: .controlAccentColor)) }
+        for phone in card.phones { stack.addArrangedSubview(makeLabel(phone, font: .systemFont(ofSize: 12), color: .secondaryLabelColor)) }
+
+        container.wantsLayer = true
+        container.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+        container.layer?.cornerRadius = 8
+        container.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: container.topAnchor, constant: 8),
+            stack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
+            stack.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
+            stack.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -8),
+        ])
+        return container
+    }
+
+    private static func buildICSPreview(_ event: ICSEvent) -> NSView {
+        let container = NSView()
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 2
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        func makeLabel(_ text: String, font: NSFont, color: NSColor = .labelColor) -> NSTextField {
+            let f = NSTextField(labelWithString: text)
+            f.font = font
+            f.textColor = color
+            return f
+        }
+
+        let fmt = DateFormatter()
+        fmt.dateStyle = .medium
+        fmt.timeStyle = .short
+
+        if let summary = event.summary {
+            stack.addArrangedSubview(makeLabel(summary, font: .systemFont(ofSize: 13, weight: .semibold)))
+        }
+        if let start = event.start {
+            let dateStr: String
+            if let end = event.end {
+                dateStr = "\(fmt.string(from: start)) – \(fmt.string(from: end))"
+            } else {
+                dateStr = fmt.string(from: start)
+            }
+            stack.addArrangedSubview(makeLabel(dateStr, font: .systemFont(ofSize: 12), color: .secondaryLabelColor))
+        }
+        if let location = event.location {
+            stack.addArrangedSubview(makeLabel(location, font: .systemFont(ofSize: 12), color: .secondaryLabelColor))
+        }
+        if let organizer = event.organizer {
+            stack.addArrangedSubview(makeLabel("Organizer: \(organizer)", font: .systemFont(ofSize: 11), color: .tertiaryLabelColor))
+        }
+
+        container.wantsLayer = true
+        container.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+        container.layer?.cornerRadius = 8
+        container.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: container.topAnchor, constant: 8),
+            stack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
+            stack.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
+            stack.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -8),
+        ])
+        return container
     }
 
     private var currentAttachments: [AttachmentInfo] = []
@@ -533,6 +955,7 @@ final class MessageCardView: NSObject {
         if webView == nil {
             let config = WKWebViewConfiguration()
             config.preferences.isElementFullscreenEnabled = false
+            config.setURLSchemeHandler(cidHandler, forURLScheme: "cid")
             let wv = WKWebView(frame: .zero, configuration: config)
             wv.translatesAutoresizingMaskIntoConstraints = false
             wv.setValue(true, forKey: "drawsBackground")
@@ -541,7 +964,8 @@ final class MessageCardView: NSObject {
                 wv.topAnchor.constraint(equalTo: headerSeparator.bottomAnchor, constant: 8),
                 wv.leadingAnchor.constraint(equalTo: expandedContainer.leadingAnchor, constant: 4),
                 wv.trailingAnchor.constraint(equalTo: expandedContainer.trailingAnchor, constant: -4),
-                wv.bottomAnchor.constraint(equalTo: actionBar.topAnchor, constant: -8),
+                wv.bottomAnchor.constraint(equalTo: expandedContainer.bottomAnchor, constant: -8),
+                wv.heightAnchor.constraint(greaterThanOrEqualToConstant: 200),
             ])
             webView = wv
         }

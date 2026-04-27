@@ -292,6 +292,71 @@ actor MailStore {
             }
         }
 
+        // v9: per-account HTML signature; migrate global UserDefaults value on first run.
+        migrator.registerMigration("v9_account_signatures") { db in
+            try db.alter(table: "accounts") { t in
+                t.add(column: "signature_html", .text)
+            }
+            // Migrate legacy global signature to every existing account.
+            if let global = UserDefaults.standard.string(forKey: "email_signature"), !global.isEmpty {
+                let accounts = try AccountRecord.fetchAll(db)
+                for var account in accounts {
+                    account.signatureHtml = global
+                    try account.update(db)
+                }
+                UserDefaults.standard.removeObject(forKey: "email_signature")
+            }
+        }
+
+        // v10: undo-send — add send_after / attempts / last_error to outbox + index.
+        migrator.registerMigration("v10_outbox_undo_send") { db in
+            try db.alter(table: "outbox") { t in
+                t.add(column: "send_after", .integer)
+                t.add(column: "attempts", .integer).notNull().defaults(to: 0)
+                t.add(column: "last_error", .text)
+            }
+            try db.execute(sql: "CREATE INDEX IF NOT EXISTS idx_outbox_due ON outbox(status, send_after)")
+        }
+
+        // v11: image allowlist — senders whose remote images are always shown.
+        migrator.registerMigration("v11_image_allowlist") { db in
+            try db.execute(sql: """
+                CREATE TABLE image_allowlist (
+                    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+                    sender_email TEXT NOT NULL COLLATE NOCASE,
+                    PRIMARY KEY (account_id, sender_email)
+                )
+            """)
+        }
+
+        // v12: snooze — deferred emails returned to inbox at a specified time.
+        migrator.registerMigration("v12_snoozes") { db in
+            try db.execute(sql: """
+                CREATE TABLE snoozes (
+                    email_id INTEGER PRIMARY KEY REFERENCES emails(id) ON DELETE CASCADE,
+                    account_id TEXT NOT NULL,
+                    snooze_until INTEGER NOT NULL,
+                    original_folder TEXT NOT NULL,
+                    created_at INTEGER NOT NULL
+                );
+                CREATE INDEX idx_snoozes_due ON snoozes(snooze_until);
+            """)
+        }
+
+        // v13: saved searches — persistent named search queries.
+        migrator.registerMigration("v13_saved_searches") { db in
+            try db.execute(sql: """
+                CREATE TABLE saved_searches (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    account_id TEXT,
+                    name TEXT NOT NULL,
+                    query TEXT NOT NULL,
+                    created_at INTEGER NOT NULL
+                );
+                CREATE INDEX idx_saved_searches_account ON saved_searches(account_id);
+            """)
+        }
+
         try migrator.migrate(dbPool)
     }
 
@@ -312,6 +377,113 @@ actor MailStore {
     func getAccount(id: String) throws -> AccountRecord? {
         try dbPool.read { db in
             try AccountRecord.fetchOne(db, key: id)
+        }
+    }
+
+    func signature(accountId: String) throws -> String? {
+        try dbPool.read { db in
+            try AccountRecord.fetchOne(db, key: accountId)?.signatureHtml
+        }
+    }
+
+    func setSignature(accountId: String, html: String?) throws {
+        try dbPool.write { db in
+            try db.execute(
+                sql: "UPDATE accounts SET signature_html = ? WHERE id = ?",
+                arguments: [html, accountId]
+            )
+        }
+    }
+
+    // MARK: - Image Allowlist
+
+    func allowImages(accountId: String, sender: String) throws {
+        try dbPool.write { db in
+            try db.execute(
+                sql: "INSERT OR IGNORE INTO image_allowlist (account_id, sender_email) VALUES (?, ?)",
+                arguments: [accountId, sender]
+            )
+        }
+    }
+
+    func isImageAllowed(accountId: String, sender: String) throws -> Bool {
+        try dbPool.read { db in
+            let count = try Int.fetchOne(db,
+                sql: "SELECT COUNT(*) FROM image_allowlist WHERE account_id = ? AND sender_email = ?",
+                arguments: [accountId, sender]) ?? 0
+            return count > 0
+        }
+    }
+
+    func removeImageAllow(accountId: String, sender: String) throws {
+        try dbPool.write { db in
+            try db.execute(
+                sql: "DELETE FROM image_allowlist WHERE account_id = ? AND sender_email = ?",
+                arguments: [accountId, sender]
+            )
+        }
+    }
+
+    // MARK: - Snooze
+
+    func insertSnooze(emailId: Int64, accountId: String, until: Date, originalFolder: String) throws {
+        try dbPool.write { db in
+            try db.execute(
+                sql: """
+                    INSERT OR REPLACE INTO snoozes (email_id, account_id, snooze_until, original_folder, created_at)
+                    VALUES (?, ?, ?, ?, ?)
+                """,
+                arguments: [emailId, accountId, Int(until.timeIntervalSince1970), originalFolder, Int(Date().timeIntervalSince1970)]
+            )
+        }
+    }
+
+    func deleteSnooze(emailId: Int64) throws {
+        try dbPool.write { db in
+            try db.execute(sql: "DELETE FROM snoozes WHERE email_id = ?", arguments: [emailId])
+        }
+    }
+
+    struct SnoozeRecord {
+        let emailId: Int64
+        let accountId: String
+        let snoozeUntil: Date
+        let originalFolder: String
+    }
+
+    func dueSnoozes(now: Date) throws -> [SnoozeRecord] {
+        try dbPool.read { db in
+            let rows = try Row.fetchAll(db,
+                sql: "SELECT email_id, account_id, snooze_until, original_folder FROM snoozes WHERE snooze_until <= ?",
+                arguments: [Int(now.timeIntervalSince1970)])
+            return rows.map { row in
+                SnoozeRecord(
+                    emailId: row["email_id"],
+                    accountId: row["account_id"],
+                    snoozeUntil: Date(timeIntervalSince1970: TimeInterval(row["snooze_until"] as Int64)),
+                    originalFolder: row["original_folder"]
+                )
+            }
+        }
+    }
+
+    func listSnoozed(accountId: String) throws -> [EmailRecord] {
+        try dbPool.read { db in
+            let ids = try Int64.fetchAll(db,
+                sql: "SELECT email_id FROM snoozes WHERE account_id = ? ORDER BY snooze_until ASC",
+                arguments: [accountId])
+            guard !ids.isEmpty else { return [] }
+            return try EmailRecord.fetchAll(db,
+                sql: "SELECT * FROM emails WHERE id IN (\(ids.map { _ in "?" }.joined(separator: ","))) AND is_deleted = 0",
+                arguments: StatementArguments(ids))
+        }
+    }
+
+    func snoozedCount(accountId: String) throws -> Int {
+        try dbPool.read { db in
+            try Int.fetchOne(db,
+                sql: "SELECT COUNT(*) FROM snoozes WHERE account_id = ?",
+                arguments: [accountId]) ?? 0
         }
     }
 
@@ -434,6 +606,29 @@ actor MailStore {
         }
     }
 
+    func fetchInboxesAcrossAccounts(accountIds: [String], offset: Int, limit: Int) throws -> [EmailRecord] {
+        guard !accountIds.isEmpty else { return [] }
+        return try dbPool.read { db in
+            let placeholders = accountIds.map { _ in "?" }.joined(separator: ", ")
+            var args: [DatabaseValue] = accountIds.map(\.databaseValue)
+            args.append(limit.databaseValue)
+            args.append(offset.databaseValue)
+            // "INBOX" is the canonical folder name across IMAP and JMAP providers.
+            let sql = """
+                SELECT e.* FROM emails e
+                WHERE e.account_id IN (\(placeholders))
+                  AND e.folder = 'INBOX'
+                  AND e.is_deleted = 0
+                  AND (e.delete_state IS NULL OR e.delete_state != 'pending_delete')
+                ORDER BY e.date DESC
+                LIMIT ? OFFSET ?
+            """
+            let statement = try db.makeStatement(sql: sql)
+            try statement.setArguments(StatementArguments(args))
+            return try EmailRecord.fetchAll(statement)
+        }
+    }
+
     // MARK: - Search
 
     func search(query: String, accountId: String? = nil) throws -> [EmailRecord] {
@@ -455,6 +650,123 @@ actor MailStore {
                 query = query.filter(Column("account_id") == accountId)
             }
             return try query.order(Column("date").desc).fetchAll(db)
+        }
+    }
+
+    func search(parsed: ParsedQuery, accountId: String? = nil) throws -> [EmailRecord] {
+        return try dbPool.read { db in
+            var sql = ""
+            var args: [DatabaseValue] = []
+
+            // FTS join if there's a text query
+            if let fts = parsed.ftsQuery, !fts.isEmpty {
+                let escaped = fts.replacingOccurrences(of: "\"", with: "\"\"")
+                sql = """
+                    SELECT e.* FROM emails e
+                    JOIN email_fts f ON f.rowid = e.id
+                    WHERE f MATCH ?
+                """
+                args.append(("\"\(escaped)\"").databaseValue)
+            } else {
+                sql = "SELECT e.* FROM emails e WHERE 1=1"
+            }
+
+            // Structural predicates
+            for pred in parsed.predicates {
+                switch pred.kind {
+                case .from:
+                    sql += " AND e.sender_email LIKE ?"
+                    args.append("%\(pred.value)%".databaseValue)
+                case .to:
+                    sql += " AND e.recipients LIKE ?"
+                    args.append("%\(pred.value)%".databaseValue)
+                case .cc:
+                    sql += " AND e.cc_header LIKE ?"
+                    args.append("%\(pred.value)%".databaseValue)
+                case .subject:
+                    sql += " AND e.subject LIKE ?"
+                    args.append("%\(pred.value)%".databaseValue)
+                case .hasAttachment:
+                    sql += " AND e.has_attachments = 1"
+                case .before:
+                    if let ts = Int64(pred.value) {
+                        sql += " AND e.date < ?"
+                        args.append(ts.databaseValue)
+                    }
+                case .after:
+                    if let ts = Int64(pred.value) {
+                        sql += " AND e.date >= ?"
+                        args.append(ts.databaseValue)
+                    }
+                case .inFolder:
+                    sql += " AND e.folder LIKE ?"
+                    args.append("%\(pred.value)%".databaseValue)
+                case .isUnread:
+                    sql += " AND e.is_read = 0"
+                case .isStarred:
+                    sql += " AND e.is_starred = 1"
+                }
+            }
+
+            sql += " AND e.is_deleted = 0 AND (e.delete_state IS NULL OR e.delete_state != 'pending_delete')"
+            if let accountId {
+                sql += " AND e.account_id = ?"
+                args.append(accountId.databaseValue)
+            }
+            sql += " ORDER BY e.date DESC LIMIT 200"
+
+            let statement = try db.makeStatement(sql: sql)
+            try statement.setArguments(StatementArguments(args))
+            return try EmailRecord.fetchAll(statement)
+        }
+    }
+
+    // MARK: - Saved Searches
+
+    struct SavedSearchRecord: Codable, FetchableRecord, PersistableRecord {
+        static let databaseTableName = "saved_searches"
+        var id: Int64?
+        var accountId: String?
+        var name: String
+        var query: String
+        var createdAt: Int64
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case accountId = "account_id"
+            case name
+            case query
+            case createdAt = "created_at"
+        }
+
+        mutating func didInsert(_ inserted: InsertionSuccess) {
+            id = inserted.rowID
+        }
+    }
+
+    func insertSavedSearch(accountId: String?, name: String, query: String) throws -> Int64 {
+        let record = SavedSearchRecord(id: nil, accountId: accountId, name: name, query: query,
+                                       createdAt: Int64(Date().timeIntervalSince1970))
+        return try dbPool.write { db in
+            try record.insert(db)
+            return db.lastInsertedRowID
+        }
+    }
+
+    func fetchSavedSearches(accountId: String? = nil) throws -> [SavedSearchRecord] {
+        try dbPool.read { db in
+            if let accountId {
+                return try SavedSearchRecord
+                    .filter(Column("account_id") == accountId || Column("account_id") == nil)
+                    .order(Column("name")).fetchAll(db)
+            }
+            return try SavedSearchRecord.order(Column("name")).fetchAll(db)
+        }
+    }
+
+    func deleteSavedSearch(id: Int64) throws {
+        try dbPool.write { db in
+            try db.execute(sql: "DELETE FROM saved_searches WHERE id = ?", arguments: [id])
         }
     }
 
@@ -527,6 +839,12 @@ actor MailStore {
                 sql: "UPDATE emails SET is_deleted = 1 WHERE id IN (\(placeholders))",
                 arguments: StatementArguments(args)
             )
+        }
+    }
+
+    func restoreEmail(emailId: Int64) throws {
+        try dbPool.write { db in
+            try db.execute(sql: "UPDATE emails SET is_deleted = 0 WHERE id = ?", arguments: [emailId])
         }
     }
 
@@ -751,7 +1069,7 @@ actor MailStore {
     func insertAttachments(_ attachments: [AttachmentRecord]) throws {
         guard !attachments.isEmpty else { return }
         try dbPool.write { db in
-            for var att in attachments {
+            for att in attachments {
                 try att.insert(db)
             }
         }
@@ -845,6 +1163,76 @@ actor MailStore {
     func updateOutboxStatus(id: Int64, status: String) throws {
         try dbPool.write { db in
             try db.execute(sql: "UPDATE outbox SET status = ? WHERE id = ?", arguments: [status, id])
+        }
+    }
+
+    /// Insert a new queued send entry. Returns the new row id.
+    func enqueueOutgoing(_ rec: OutboxRecord) throws -> Int64 {
+        try dbPool.write { db in
+            try rec.insert(db)
+            return db.lastInsertedRowID
+        }
+    }
+
+    /// Returns queued/scheduled entries whose send_after timestamp is <= now.
+    func dueOutgoing(now: Date) throws -> [OutboxRecord] {
+        let nowInt = Int(now.timeIntervalSince1970)
+        return try dbPool.read { db in
+            try OutboxRecord.filter(
+                sql: "status IN ('queued','scheduled') AND send_after <= ?",
+                arguments: [nowInt]
+            ).fetchAll(db)
+        }
+    }
+
+    /// Atomically marks one queued or scheduled row as "sending". Returns true if claimed.
+    func atomicClaimForSending(id: Int64) throws -> Bool {
+        try dbPool.write { db in
+            try db.execute(
+                sql: "UPDATE outbox SET status = 'sending' WHERE id = ? AND status IN ('queued','scheduled')",
+                arguments: [id]
+            )
+            return db.changesCount > 0
+        }
+    }
+
+    /// Sets status to "canceled" and returns the record so the caller can restore the composer.
+    func cancelOutgoing(id: Int64) throws -> OutboxRecord? {
+        try dbPool.write { db in
+            let rec = try OutboxRecord.fetchOne(db, key: id)
+            try db.execute(
+                sql: "UPDATE outbox SET status = 'canceled' WHERE id = ? AND status IN ('queued','sending','scheduled')",
+                arguments: [id]
+            )
+            return db.changesCount > 0 ? rec : nil
+        }
+    }
+
+    /// Returns all scheduled messages for an account, ordered by send time.
+    func listScheduled(accountId: String) throws -> [OutboxRecord] {
+        try dbPool.read { db in
+            try OutboxRecord.filter(
+                Column("status") == "scheduled" && Column("account_id") == accountId
+            ).order(Column("send_after")).fetchAll(db)
+        }
+    }
+
+    /// Count of scheduled messages for an account (for sidebar badge).
+    func scheduledCount(accountId: String) throws -> Int {
+        try dbPool.read { db in
+            try Int.fetchOne(db,
+                sql: "SELECT COUNT(*) FROM outbox WHERE account_id = ? AND status = 'scheduled'",
+                arguments: [accountId]) ?? 0
+        }
+    }
+
+    /// Marks a send as failed and records the error message.
+    func setOutgoingError(id: Int64, error: String) throws {
+        try dbPool.write { db in
+            try db.execute(
+                sql: "UPDATE outbox SET status = 'failed', last_error = ?, attempts = attempts + 1 WHERE id = ?",
+                arguments: [error, id]
+            )
         }
     }
 
@@ -943,6 +1331,7 @@ struct AccountRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var keychainRef: String
     var isDefault: Bool
     var createdAt: Int?
+    var signatureHtml: String?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -959,6 +1348,7 @@ struct AccountRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         case keychainRef = "keychain_ref"
         case isDefault = "is_default"
         case createdAt = "created_at"
+        case signatureHtml = "signature_html"
     }
 }
 
@@ -1078,9 +1468,43 @@ struct OutboxRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var createdAt: Int?
     var status: String
     var accountId: String?
+    var sendAfter: Int?
+    var attempts: Int
+    var lastError: String?
+
+    init(toRecipients: String, ccRecipients: String? = nil, bccRecipients: String? = nil,
+         subject: String? = nil, bodyText: String? = nil, bodyHtml: String? = nil,
+         inReplyTo: String? = nil, createdAt: Int? = nil, status: String = "queued",
+         accountId: String? = nil, sendAfter: Int? = nil, attempts: Int = 0, lastError: String? = nil) {
+        self.toRecipients = toRecipients; self.ccRecipients = ccRecipients
+        self.bccRecipients = bccRecipients; self.subject = subject
+        self.bodyText = bodyText; self.bodyHtml = bodyHtml; self.inReplyTo = inReplyTo
+        self.createdAt = createdAt; self.status = status; self.accountId = accountId
+        self.sendAfter = sendAfter; self.attempts = attempts; self.lastError = lastError
+    }
+
+    func toOutgoingMessage() -> OutgoingMessage {
+        func parseAddresses(_ s: String?) -> [String] {
+            guard let s else { return [] }
+            // JSON array format (used by enqueueSend / saveDraft).
+            if let data = s.data(using: .utf8),
+               let arr = try? JSONDecoder().decode([String].self, from: data) { return arr }
+            // Fallback: plain comma-separated.
+            return s.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        }
+        return OutgoingMessage(
+            to: parseAddresses(toRecipients),
+            cc: parseAddresses(ccRecipients),
+            bcc: parseAddresses(bccRecipients),
+            subject: subject ?? "",
+            bodyText: bodyText ?? "",
+            bodyHtml: bodyHtml,
+            inReplyTo: inReplyTo
+        )
+    }
 
     enum CodingKeys: String, CodingKey {
-        case id, subject, status
+        case id, subject, status, attempts
         case toRecipients = "to_recipients"
         case ccRecipients = "cc_recipients"
         case bccRecipients = "bcc_recipients"
@@ -1089,6 +1513,8 @@ struct OutboxRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         case inReplyTo = "in_reply_to"
         case createdAt = "created_at"
         case accountId = "account_id"
+        case sendAfter = "send_after"
+        case lastError = "last_error"
     }
 }
 

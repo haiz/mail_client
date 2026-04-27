@@ -1,6 +1,6 @@
 import AppKit
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     private var windowController: MainWindowController?
     private var accountManager: AccountManager?
     private var currentAccountId: String?
@@ -10,6 +10,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var composerWindow: ComposerWindow?
     private var contactsStore: ContactsStore?
     private var activatedAccountIds: Set<String> = []
+    private var snoozeWorker: SnoozeWorker?
+    private var labelPickerPopover: LabelPickerPopover?
     private var displayedEmailId: Int64?
     private var isSyncing = false
     private var syncStartTime: Date?
@@ -43,7 +45,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.loadMessages()
         }
         wc.onMessageSelected = { [weak self] header in
-            self?.loadMessageDetail(header: header)
+            if self?.currentFolder == "__scheduled__" {
+                self?.editScheduledMessage(outboxId: header.id)
+            } else {
+                self?.loadMessageDetail(header: header)
+            }
         }
         wc.onAction = { [weak self] action in
             self?.handleAction(action)
@@ -76,6 +82,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         wc.sidebarView.onMoveToFolder = { [weak self] emailId, folderId in
             self?.handleAction(.moveToFolder(emailId, folderId))
+        }
+        wc.sidebarView.onSavedSearchSelected = { [weak self] query in
+            self?.performSearch(query: query)
+        }
+        wc.sidebarView.onDeleteSavedSearch = { [weak self] id in
+            Task { [weak self] in
+                try? await self?.accountManager?.deleteSavedSearch(id: id)
+                await self?.reloadSavedSearches()
+            }
+        }
+        wc.messageListView.onArchiveSelected = { [weak self] in
+            if let h = self?.windowController?.messageListView.selectedHeader {
+                self?.handleAction(.archive(h.id))
+            }
+        }
+        wc.messageListView.onDeleteSelected = { [weak self] in
+            if let h = self?.windowController?.messageListView.selectedHeader {
+                self?.handleAction(.delete(h.id))
+            }
+        }
+        wc.messageListView.onReplySelected = { [weak self] in
+            if let h = self?.windowController?.messageListView.selectedHeader {
+                self?.handleAction(.reply(h.id))
+            }
+        }
+        wc.messageListView.onReplyAllSelected = { [weak self] in
+            if let h = self?.windowController?.messageListView.selectedHeader {
+                self?.handleAction(.replyAll(h.id))
+            }
+        }
+        wc.messageListView.onForwardSelected = { [weak self] in
+            if let h = self?.windowController?.messageListView.selectedHeader {
+                self?.handleAction(.forward(h.id))
+            }
+        }
+        wc.messageListView.onToggleStarSelected = { [weak self] in
+            if let h = self?.windowController?.messageListView.selectedHeader {
+                self?.handleAction(.toggleStar(h.id))
+            }
+        }
+        wc.messageListView.onMarkSpamSelected = { [weak self] in
+            if let h = self?.windowController?.messageListView.selectedHeader {
+                self?.handleAction(.markSpam(h.id))
+            }
+        }
+        wc.messageListView.onMarkUnreadSelected = { [weak self] in
+            if let h = self?.windowController?.messageListView.selectedHeader {
+                self?.handleAction(.markUnread(h.id))
+            }
+        }
+        wc.messageListView.onFolderShortcut = { [weak self] action in
+            self?.handleFolderShortcut(action)
+        }
+        wc.messageListView.onSaveSearch = { [weak self] query in
+            self?.promptSaveSearch(query: query)
         }
 
         setupMainMenu()
@@ -129,8 +190,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let msgMenuItem = NSMenuItem()
         let msgMenu = NSMenu(title: "Message")
-        msgMenu.addItem(withTitle: "Sync Now", action: #selector(syncNow), keyEquivalent: "r")
+        msgMenu.addItem(withTitle: "Reply All", action: #selector(replyAllMessage), keyEquivalent: "r")
         msgMenu.items.last?.keyEquivalentModifierMask = [.command, .shift]
+        msgMenu.addItem(.separator())
+        msgMenu.addItem(withTitle: "Sync Now", action: #selector(syncNow), keyEquivalent: "")
         msgMenuItem.submenu = msgMenu
         mainMenu.addItem(msgMenuItem)
 
@@ -155,6 +218,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task {
                 try await manager.loadAccounts()
                 await manager.startDeleteWorker()
+                await manager.startOutboxWorker()
+                let worker = SnoozeWorker(store: store, engine: manager)
+                await worker.start()
+                await MainActor.run { self.snoozeWorker = worker }
                 let accounts = try await manager.listAccounts()
 
                 if accounts.isEmpty {
@@ -203,6 +270,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Data Loading
 
     private func loadMessages() {
+        if currentFolder == "__scheduled__" {
+            loadScheduledMessages()
+            return
+        }
+        if currentAccountId == AccountManager.unifiedAccountId {
+            loadUnifiedInbox()
+            return
+        }
         guard let accountManager, let accountId = currentAccountId else { return }
         // Reset pagination state. Every folder/account switch and every action
         // that calls loadMessages should start from a clean page.
@@ -220,6 +295,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 updateStatusBar()
             } catch {
                 showError("Failed to load messages: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func loadScheduledMessages() {
+        guard let accountManager, let accountId = currentAccountId else { return }
+        isLoadingMoreMessages = false
+        hasMoreMessages = false
+        Task { @MainActor in
+            do {
+                let scheduled = try await accountManager.listScheduled(accountId: accountId)
+                let accounts = (try? await accountManager.listAccounts()) ?? []
+                let senderEmail = accounts.first(where: { $0.id == accountId })?.emailAddress ?? accountId
+                let headers = scheduled.map { msg in
+                    EmailHeader(
+                        id: msg.id,
+                        accountId: msg.accountId,
+                        messageId: "scheduled-\(msg.id)",
+                        threadId: nil,
+                        folder: "__scheduled__",
+                        senderName: nil,
+                        senderEmail: senderEmail,
+                        subject: msg.subject.map { "[Scheduled] \($0)" } ?? "[Scheduled]",
+                        date: msg.sendAfter,
+                        isRead: true,
+                        isStarred: false,
+                        hasAttachments: false,
+                        snippet: msg.to.first.map { "To: \($0)" },
+                        recipients: msg.to.joined(separator: ", "),
+                        deleteState: "normal"
+                    )
+                }
+                windowController?.messageListView.update(messages: headers)
+                windowController?.messageListView.setCanLoadMore(false)
+            } catch {
+                showError("Failed to load scheduled messages: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func loadUnifiedInbox() {
+        guard let accountManager else { return }
+        isLoadingMoreMessages = false
+        hasMoreMessages = true
+        let limit = DisplayPreferences.emailListLimit
+        Task { @MainActor in
+            do {
+                let headers = try await accountManager.fetchUnifiedInbox(offset: 0, limit: limit)
+                windowController?.messageListView.update(messages: headers)
+                hasMoreMessages = headers.count >= limit
+                windowController?.messageListView.setCanLoadMore(hasMoreMessages && !isSearching)
+            } catch {
+                showError("Failed to load unified inbox: \(error.localizedDescription)")
             }
         }
     }
@@ -295,8 +423,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
 
                 // Wire callbacks
-                windowController?.threadDetailView.onReply = { [weak self] h, b in
-                    self?.openComposer(mode: .reply(to: h, body: b))
+                windowController?.threadDetailView.onSendReply = { [weak self] message, completion in
+                    self?.sendMessage(message, completion: completion)
+                }
+                windowController?.threadDetailView.onSaveDraft = { [weak self] draft in
+                    guard let self, let accountId = self.currentAccountId else { return }
+                    Task { try? await self.accountManager?.saveDraft(draft, accountId: accountId) }
                 }
                 windowController?.threadDetailView.onForward = { [weak self] h, b in
                     self?.openComposer(mode: .forward(original: h, body: b))
@@ -307,11 +439,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 windowController?.threadDetailView.onDelete = { [weak self] id in
                     self?.handleAction(.delete(id))
                 }
+                windowController?.threadDetailView.onMarkSpam = { [weak self] id in
+                    self?.handleAction(.markSpam(id))
+                }
+                windowController?.threadDetailView.onSnooze = { [weak self] id, date in
+                    guard let manager = self?.accountManager else { return }
+                    Task { try? await manager.snooze(emailId: id, until: date) }
+                }
+                windowController?.threadDetailView.onShowLabelPicker = { [weak self] anchorView, emailId in
+                    self?.showLabelPicker(anchorView: anchorView, emailId: emailId)
+                }
                 windowController?.threadDetailView.onMove = { [weak self] id, folderId in
                     self?.handleAction(.moveToFolder(id, folderId))
                 }
                 windowController?.threadDetailView.onDownloadAttachment = { [weak self] emailId, att in
                     self?.downloadAttachment(emailId: emailId, attachment: att)
+                }
+                windowController?.threadDetailView.onFetchAttachmentData = { [weak self] emailId, partId in
+                    guard let accountManager = self?.accountManager else { throw URLError(.fileDoesNotExist) }
+                    return try await accountManager.fetchAttachmentData(emailId: emailId, partId: partId)
                 }
 
                 // Body fetch callback — loads body on demand when cards expand
@@ -350,6 +496,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 showError("Failed to load thread: \(error.localizedDescription)")
             }
         }
+    }
+
+    private func handleFolderShortcut(_ action: ShortcutAction) {
+        guard currentAccountId != nil,
+              let sidebarView = windowController?.sidebarView else { return }
+        let folderId: String
+        switch action {
+        case .gotoInbox:  folderId = "INBOX"
+        case .gotoSent:   folderId = "[Gmail]/Sent Mail"
+        case .gotoAll:    folderId = "[Gmail]/All Mail"
+        default: return
+        }
+        // Simulate folder selection
+        currentFolder = folderId
+        displayedEmailId = nil
+        loadMessages()
+        _ = sidebarView  // sidebar selection update is driven by the outline view; just load messages
     }
 
     private func performSearch(query: String) {
@@ -419,8 +582,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     try await accountManager.archive(emailId: id)
                     loadMessages()
                 case .delete(let id) where id > 0:
-                    try await accountManager.delete(emailId: id)
-                    loadMessages()
+                    if currentFolder == "__scheduled__" {
+                        _ = try? await accountManager.cancelScheduled(outboxId: id)
+                        loadScheduledMessages()
+                        loadSidebar()
+                    } else {
+                        try await accountManager.delete(emailId: id)
+                        loadMessages()
+                    }
                 case .toggleStar(let id) where id > 0:
                     if let header = windowController?.messageListView.selectedHeader {
                         try await accountManager.markStarred(emailId: id, starred: !header.isStarred)
@@ -443,6 +612,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     if let header = windowController?.messageListView.selectedHeader {
                         let body = try await accountManager.fetchBody(emailId: id)
                         openComposer(mode: .reply(to: header, body: body))
+                    }
+                case .replyAll(let id) where id > 0:
+                    if let header = windowController?.messageListView.selectedHeader {
+                        let accounts = (try? await accountManager.listAccounts()) ?? []
+                        let accountEmail = accounts.first(where: { $0.id == currentAccountId })?.emailAddress ?? ""
+                        let body = try await accountManager.fetchBody(emailId: id)
+                        openComposer(mode: .replyAll(to: header, body: body, accountEmail: accountEmail))
                     }
                 case .forward(let id) where id > 0:
                     if let header = windowController?.messageListView.selectedHeader {
@@ -564,12 +740,124 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 case .batchMove(let ids, _) where !ids.isEmpty:
                     // batchMove with empty folder — no-op (folder picker not yet implemented)
                     windowController?.messageListView.clearCheckedIds()
+                case .markSpam(let id) where id > 0:
+                    try await accountManager.markSpam(emailId: id)
+                    loadMessages()
+                case .batchMarkSpam(let ids) where !ids.isEmpty:
+                    let expandedIds = try await expandThreadIds(ids)
+                    try await accountManager.markSpamBatch(emailIds: expandedIds)
+                    refreshAfterBatchAction()
+                    windowController?.messageListView.clearCheckedIds()
                 default:
                     break
                 }
             } catch {
                 showError("Action failed: \(error.localizedDescription)")
             }
+        }
+    }
+
+    // MARK: - Send
+
+    /// Shared send path for inline reply view. Queues with undo-send delay if configured.
+    func sendMessage(_ message: OutgoingMessage, completion: @escaping (String?) -> Void) {
+        guard let accountId = currentAccountId else {
+            completion("No account selected.")
+            return
+        }
+        let delay = UserDefaults.standard.integer(forKey: "undo_send_delay")
+        if delay > 0 {
+            Task { @MainActor in
+                do {
+                    let outboxId = try await accountManager?.enqueueSend(message, fromAccountId: accountId, delaySeconds: delay)
+                    completion(nil)
+                    guard let outboxId else { return }
+                    showUndoSendToast(message: message, outboxId: outboxId, delay: delay)
+                } catch {
+                    completion("\(error)")
+                }
+            }
+        } else {
+            Task {
+                do {
+                    try await accountManager?.send(message: message, fromAccountId: accountId)
+                    await MainActor.run {
+                        windowController?.statusBar.updateSyncStatus("Message sent")
+                        completion(nil)
+                        Task { await performSyncCycle() }
+                    }
+                } catch {
+                    let detail = "\(error)"
+                    completion(detail.isEmpty ? error.localizedDescription : detail)
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private func showLabelPicker(anchorView: NSView, emailId: Int64) {
+        guard let accountId = currentAccountId, let manager = accountManager else { return }
+        let popover = LabelPickerPopover()
+        self.labelPickerPopover = popover
+
+        Task { @MainActor in
+            async let allLabelsTask = (try? await manager.allLabels(accountId: accountId)) ?? []
+            async let appliedTask = (try? await manager.fetchLabels(emailId: emailId)) ?? []
+            let (allLabels, appliedList) = await (allLabelsTask, appliedTask)
+
+            popover.onLabelsChanged = { [weak self] toAdd, toRemove in
+                guard let manager = self?.accountManager else { return }
+                Task {
+                    for label in toAdd { try? await manager.addLabel(emailId: emailId, label: label) }
+                    for label in toRemove { try? await manager.removeLabel(emailId: emailId, label: label) }
+                }
+            }
+            popover.show(relativeTo: anchorView, labels: allLabels, applied: Set(appliedList))
+        }
+    }
+
+    /// Shows the undo-send toast and reopens the composer if the user taps Undo.
+    @MainActor
+    private func showUndoSendToast(message: OutgoingMessage, outboxId: Int64, delay: Int) {
+        let capturedMessage = message
+        let capturedId = outboxId
+        let action = UndoableBatchAction(
+            description: "Message queued",
+            reverseOperation: { @Sendable [weak self] in
+                guard let self else { return }
+                _ = try? await self.accountManager?.cancelSend(outboxId: capturedId)
+                await MainActor.run { [weak self] in
+                    self?.openComposer(mode: .draft(
+                        OutboxRecord(
+                            toRecipients: capturedMessage.to.joined(separator: ", "),
+                            ccRecipients: capturedMessage.cc.isEmpty ? nil : capturedMessage.cc.joined(separator: ", "),
+                            bccRecipients: capturedMessage.bcc.isEmpty ? nil : capturedMessage.bcc.joined(separator: ", "),
+                            subject: capturedMessage.subject,
+                            bodyText: capturedMessage.bodyText,
+                            bodyHtml: capturedMessage.bodyHtml,
+                            inReplyTo: capturedMessage.inReplyTo,
+                            status: "canceled"
+                        )
+                    ))
+                }
+            },
+            emailIds: [],
+            countdown: delay
+        )
+        windowController?.undoToastView.show(action: action, onExpire: {
+            Task { await self.performSyncCycle() }
+        })
+    }
+
+    // MARK: - Scheduled Messages
+
+    private func editScheduledMessage(outboxId: Int64) {
+        guard let accountManager else { return }
+        Task { @MainActor in
+            guard let rec = try? await accountManager.cancelScheduled(outboxId: outboxId) else { return }
+            openComposer(mode: .draft(rec))
+            loadScheduledMessages()
+            loadSidebar()
         }
     }
 
@@ -580,13 +868,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         composer.contactsStore = contactsStore
         composer.accountId = currentAccountId
 
-        // Populate From selector with all accounts
+        // Populate From selector and load signature for the selected account.
         Task { @MainActor in
-            if let accounts = try? await self.accountManager?.listAccounts() {
+            guard let manager = self.accountManager else { return }
+            if let accounts = try? await manager.listAccounts() {
                 composer.setAccounts(
                     accounts.map { (id: $0.id, email: $0.emailAddress) },
                     selected: self.currentAccountId
                 )
+            }
+            if let accountId = self.currentAccountId {
+                let sig = try? await manager.signature(accountId: accountId)
+                composer.applySignature(html: sig)
+            }
+        }
+
+        composer.onSaveDraft = { [weak self] draft in
+            guard let self, let accountId = self.currentAccountId else { return }
+            Task { try? await self.accountManager?.saveDraft(draft, accountId: accountId) }
+        }
+
+        composer.onSchedule = { [weak self, weak composer] message, date, completion in
+            guard let self else { completion("No account selected."); return }
+            let accountId = composer?.selectedAccountId ?? self.currentAccountId
+            guard let accountId else { completion("No account selected."); return }
+            Task { @MainActor in
+                do {
+                    _ = try await self.accountManager?.scheduleSend(message, fromAccountId: accountId, sendAt: date)
+                    completion(nil)
+                    self.composerWindow = nil
+                    self.loadSidebar()
+                } catch {
+                    let detail = "\(error)"
+                    completion(detail.isEmpty ? error.localizedDescription : detail)
+                }
             }
         }
 
@@ -600,26 +915,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 completion("No account selected.")
                 return
             }
-            Task {
-                do {
-                    try await self.accountManager?.send(message: message, fromAccountId: accountId)
-                    await MainActor.run {
-                        self.windowController?.statusBar.updateSyncStatus("Message sent")
-                        // completion(nil) must be called before composerWindow = nil.
-                        // The completion closure captures ComposerWindow via [weak self];
-                        // releasing composerWindow first deallocates it, making self nil
-                        // and leaving the window stuck in "Sending…" forever.
+            let delay = UserDefaults.standard.integer(forKey: "undo_send_delay")
+            if delay > 0 {
+                Task { @MainActor in
+                    do {
+                        let outboxId = try await self.accountManager?.enqueueSend(message, fromAccountId: accountId, delaySeconds: delay)
                         completion(nil)
                         self.composerWindow = nil
-                        // Sync so the Sent folder appears promptly
-                        Task { await self.performSyncCycle() }
+                        guard let outboxId else { return }
+                        self.showUndoSendToast(message: message, outboxId: outboxId, delay: delay)
+                    } catch {
+                        let detail = "\(error)"
+                        completion(detail.isEmpty ? error.localizedDescription : detail)
                     }
-                } catch {
-                    // Use full string description so NIOConnectionError shows its
-                    // connectionErrors details instead of the generic "error 1" NSError format.
-                    let detail = "\(error)"
-                    let friendly = detail.isEmpty ? error.localizedDescription : detail
-                    completion(friendly)
+                }
+            } else {
+                Task {
+                    do {
+                        try await self.accountManager?.send(message: message, fromAccountId: accountId)
+                        await MainActor.run {
+                            self.windowController?.statusBar.updateSyncStatus("Message sent")
+                            // completion(nil) must be called before composerWindow = nil.
+                            // The completion closure captures ComposerWindow via [weak self];
+                            // releasing composerWindow first deallocates it, making self nil
+                            // and leaving the window stuck in "Sending…" forever.
+                            completion(nil)
+                            self.composerWindow = nil
+                            Task { await self.performSyncCycle() }
+                        }
+                    } catch {
+                        let detail = "\(error)"
+                        let friendly = detail.isEmpty ? error.localizedDescription : detail
+                        completion(friendly)
+                    }
                 }
             }
         }
@@ -630,6 +958,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Menu Actions
 
     @objc private func composeNewMessage() { openComposer(mode: .compose) }
+
+    @objc private func replyAllMessage() {
+        guard let header = windowController?.messageListView.selectedHeader else { return }
+        Task { @MainActor in
+            guard let manager = self.accountManager else { return }
+            let accounts = (try? await manager.listAccounts()) ?? []
+            let accountEmail = accounts.first(where: { $0.id == self.currentAccountId })?.emailAddress ?? ""
+            let body = try? await manager.fetchBody(emailId: header.id)
+            self.openComposer(mode: .replyAll(to: header, body: body, accountEmail: accountEmail))
+        }
+    }
 
     @objc private func printEmail() {
         // Print not yet supported in thread view
@@ -795,6 +1134,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             settings.onSyncNow = { [weak self] in
                 self?.syncNow()
             }
+            settings.onLoadSignature = { [weak self] accountId in
+                guard let manager = self?.accountManager else { return nil }
+                return try? await manager.signature(accountId: accountId)
+            }
+            settings.onSaveSignature = { [weak self] accountId, html in
+                Task { try? await self?.accountManager?.setSignature(accountId: accountId, html: html) }
+            }
             self.settingsWindow = settings  // Retain reference
             settings.show()
         }
@@ -920,11 +1266,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let folders = try await accountManager.listFolders(accountId: accountId)
             let displayFolders = folders.isEmpty ? Self.defaultFolders() : folders
             windowController?.sidebarView.updateFolders(displayFolders)
+            await reloadSavedSearches()
         }
     }
 
     private func switchAccount(_ accountId: String) {
         currentAccountId = accountId
+        if accountId == AccountManager.unifiedAccountId {
+            currentFolder = "INBOX"
+            displayedEmailId = nil
+            loadMessages()
+            return
+        }
         UserDefaults.standard.set(accountId, forKey: "lastActiveAccountId")
         activatedAccountIds.insert(accountId)
         currentFolder = "INBOX"
@@ -978,6 +1331,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.informativeText = message
         alert.alertStyle = .warning
         alert.runModal()
+    }
+
+    // MARK: - Saved Searches
+
+    private func promptSaveSearch(query: String) {
+        let alert = NSAlert()
+        alert.messageText = "Save Search"
+        alert.informativeText = "Enter a name for this search:"
+        let nameField = NSTextField(frame: NSRect(x: 0, y: 0, width: 220, height: 24))
+        nameField.placeholderString = "Search name"
+        alert.accessoryView = nameField
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = nameField
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let name = nameField.stringValue.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty else { return }
+        Task { [weak self] in
+            _ = try? await self?.accountManager?.saveSearch(accountId: self?.currentAccountId, name: name, query: query)
+            await self?.reloadSavedSearches()
+        }
+    }
+
+    @MainActor
+    private func reloadSavedSearches() async {
+        guard let accountManager else { return }
+        let searches = (try? await accountManager.listSavedSearches(accountId: currentAccountId)) ?? []
+        let tuples = searches.map { (id: $0.id ?? 0, name: $0.name, query: $0.query) }
+        windowController?.sidebarView.updateSavedSearches(tuples)
     }
 
     private func isAuthError(_ error: Error) -> Bool {

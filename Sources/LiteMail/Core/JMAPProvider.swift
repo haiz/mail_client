@@ -282,6 +282,15 @@ actor JMAPProvider: MailProvider {
         try await emailSetBatch(messageRefs: messageRefs, update: ["mailboxIds": [trashMailbox.id: true]])
     }
 
+    func markSpamBatch(messageRefs: [String]) async throws {
+        guard !messageRefs.isEmpty else { return }
+        let jmap = try await getClient()
+        guard let junkMailbox = try await jmap.getMailbox(byRole: .junk) else {
+            throw JMAPProviderError.notImplemented
+        }
+        try await emailSetBatch(messageRefs: messageRefs, update: ["mailboxIds": [junkMailbox.id: true]])
+    }
+
     private func emailSetBatch(messageRefs: [String], update: [String: Any]) async throws {
         guard !messageRefs.isEmpty else { return }
         let jmap = try await getClient()

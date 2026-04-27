@@ -5,13 +5,24 @@ final class SettingsWindow: NSObject {
 
     private let window: NSWindow
     private let accountTableView: NSTableView
-    private var signatureField: NSTextField?
     private var googleClientIdField: NSTextField?
     private var emailListLimitPopup: NSPopUpButton?
+    private var undoSendDelayPopup: NSPopUpButton?
+
+    // Per-account signature UI
+    private var signatureAccountPopup: NSPopUpButton?
+    private var signatureTextView: NSTextView?
 
     var onAddAccount: (() -> Void)?
     var onRemoveAccount: ((String) -> Void)?
     var onSyncNow: (() -> Void)?
+
+    /// Called when the user switches accounts in the signature popup.
+    /// Returns the HTML signature for that account (nil = none).
+    var onLoadSignature: ((String) async -> String?)?
+
+    /// Called when the user clicks Save Signature.
+    var onSaveSignature: ((String, String?) -> Void)?
 
     private var accounts: [AccountConfig] = []
     private var emailCount: Int = 0
@@ -21,7 +32,7 @@ final class SettingsWindow: NSObject {
         self.emailCount = emailCount
 
         window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 460, height: 560),
+            contentRect: NSRect(x: 0, y: 0, width: 460, height: 620),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -47,6 +58,7 @@ final class SettingsWindow: NSObject {
 
     func show() {
         window.makeKeyAndOrderFront(nil)
+        loadSignatureForSelectedAccount()
     }
 
     private func setupLayout() {
@@ -93,19 +105,90 @@ final class SettingsWindow: NSObject {
         limitRow.spacing = 8
         limitRow.alignment = .firstBaseline
 
-        // MARK: Composing
+        // MARK: Privacy — remote image blocking
+        let privacyHeader = Self.sectionHeader("Privacy")
+
+        let imageBlockLabel = NSTextField(labelWithString: "Remote images:")
+        imageBlockLabel.font = .systemFont(ofSize: 13)
+
+        let blockAllRadio = NSButton(radioButtonWithTitle: "Always block", target: self, action: #selector(imageBlockingChanged(_:)))
+        blockAllRadio.tag = 0
+        let blockUnknownRadio = NSButton(radioButtonWithTitle: "Block from unknown senders", target: self, action: #selector(imageBlockingChanged(_:)))
+        blockUnknownRadio.tag = 1
+        let allowAllRadio = NSButton(radioButtonWithTitle: "Always allow", target: self, action: #selector(imageBlockingChanged(_:)))
+        allowAllRadio.tag = 2
+
+        switch DisplayPreferences.remoteImagePolicy {
+        case .blockAll: blockAllRadio.state = .on
+        case .blockUnknown: blockUnknownRadio.state = .on
+        case .allowAll: allowAllRadio.state = .on
+        }
+
+        let imageBlockRadioStack = NSStackView(views: [blockAllRadio, blockUnknownRadio, allowAllRadio])
+        imageBlockRadioStack.orientation = .vertical
+        imageBlockRadioStack.alignment = .leading
+        imageBlockRadioStack.spacing = 4
+
+        let imageBlockRow = NSStackView(views: [imageBlockLabel, imageBlockRadioStack])
+        imageBlockRow.spacing = 8
+        imageBlockRow.alignment = .top
+
+        // MARK: Composing — per-account signature + undo send
         let composingHeader = Self.sectionHeader("Composing")
-        let sigField = NSTextField()
-        sigField.placeholderString = "Your email signature..."
-        sigField.stringValue = UserDefaults.standard.string(forKey: "email_signature") ?? ""
-        sigField.font = .systemFont(ofSize: 12)
-        sigField.lineBreakMode = .byWordWrapping
-        sigField.translatesAutoresizingMaskIntoConstraints = false
-        sigField.widthAnchor.constraint(equalToConstant: 400).isActive = true
+
+        let undoSendLabel = NSTextField(labelWithString: "Undo Send delay:")
+        undoSendLabel.font = .systemFont(ofSize: 13)
+
+        let undoDelayPopup = NSPopUpButton()
+        for (seconds, title) in [(0, "Off"), (5, "5 seconds"), (10, "10 seconds"), (30, "30 seconds")] {
+            undoDelayPopup.addItem(withTitle: title)
+            undoDelayPopup.lastItem?.tag = seconds
+        }
+        undoDelayPopup.selectItem(withTag: UserDefaults.standard.integer(forKey: "undo_send_delay"))
+        undoDelayPopup.target = self
+        undoDelayPopup.action = #selector(undoSendDelayChanged(_:))
+        self.undoSendDelayPopup = undoDelayPopup
+
+        let undoSendRow = NSStackView(views: [undoSendLabel, undoDelayPopup])
+        undoSendRow.spacing = 8
+        undoSendRow.alignment = .firstBaseline
+
+        let sigAccountLabel = NSTextField(labelWithString: "Signature for:")
+        sigAccountLabel.font = .systemFont(ofSize: 13)
+
+        let sigAccountPopup = NSPopUpButton()
+        for account in accounts {
+            sigAccountPopup.addItem(withTitle: account.emailAddress)
+        }
+        sigAccountPopup.target = self
+        sigAccountPopup.action = #selector(signatureAccountChanged(_:))
+        self.signatureAccountPopup = sigAccountPopup
+
+        let sigAccountRow = NSStackView(views: [sigAccountLabel, sigAccountPopup])
+        sigAccountRow.spacing = 8
+        sigAccountRow.alignment = .firstBaseline
+
+        let sigTextView = NSTextView()
+        sigTextView.isRichText = true
+        sigTextView.allowsUndo = true
+        sigTextView.font = .systemFont(ofSize: 13)
+        sigTextView.isAutomaticSpellingCorrectionEnabled = false
+        sigTextView.isAutomaticQuoteSubstitutionEnabled = false
+        sigTextView.textContainerInset = NSSize(width: 6, height: 6)
+        sigTextView.textContainer?.widthTracksTextView = true
+        self.signatureTextView = sigTextView
+
+        let sigScrollView = NSScrollView()
+        sigScrollView.documentView = sigTextView
+        sigScrollView.hasVerticalScroller = true
+        sigScrollView.autohidesScrollers = true
+        sigScrollView.borderType = .bezelBorder
+        sigScrollView.translatesAutoresizingMaskIntoConstraints = false
+        sigScrollView.widthAnchor.constraint(equalToConstant: 400).isActive = true
+        sigScrollView.heightAnchor.constraint(equalToConstant: 100).isActive = true
 
         let saveSigButton = CursorButton(title: "Save Signature", target: self, action: #selector(saveSignature))
         saveSigButton.bezelStyle = .rounded
-        self.signatureField = sigField
 
         // MARK: Integrations
         let integrationsHeader = Self.sectionHeader("Integrations")
@@ -141,7 +224,9 @@ final class SettingsWindow: NSObject {
             Self.spacer(),
             appearanceHeader, limitRow,
             Self.spacer(),
-            composingHeader, sigField, saveSigButton,
+            privacyHeader, imageBlockRow,
+            Self.spacer(),
+            composingHeader, undoSendRow, sigAccountRow, sigScrollView, saveSigButton,
             Self.spacer(),
             integrationsHeader, googleClientIdField, googleHint, saveGoogleButton,
             Self.spacer(),
@@ -162,6 +247,64 @@ final class SettingsWindow: NSObject {
 
         window.contentView = container
     }
+
+    // MARK: - Signature helpers
+
+    private func selectedAccountId() -> String? {
+        guard let popup = signatureAccountPopup else { return nil }
+        let idx = popup.indexOfSelectedItem
+        guard idx >= 0, idx < accounts.count else { return nil }
+        return accounts[idx].id
+    }
+
+    private func loadSignatureForSelectedAccount() {
+        guard let accountId = selectedAccountId(), let onLoad = onLoadSignature else { return }
+        Task { @MainActor in
+            let html = await onLoad(accountId)
+            self.displaySignature(html: html)
+        }
+    }
+
+    private func displaySignature(html: String?) {
+        guard let textView = signatureTextView else { return }
+        if let html, !html.isEmpty,
+           let data = html.data(using: .utf8),
+           let attrStr = NSAttributedString(
+               html: data,
+               options: [.documentType: NSAttributedString.DocumentType.html,
+                         .characterEncoding: String.Encoding.utf8.rawValue as Any],
+               documentAttributes: nil) {
+            textView.textStorage?.setAttributedString(attrStr)
+        } else {
+            textView.textStorage?.setAttributedString(NSAttributedString(string: ""))
+        }
+    }
+
+    @objc private func signatureAccountChanged(_ sender: NSPopUpButton) {
+        loadSignatureForSelectedAccount()
+    }
+
+    @objc private func saveSignature() {
+        guard let accountId = selectedAccountId(), let textView = signatureTextView else { return }
+        let html: String?
+        if textView.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            html = nil
+        } else if let data = try? textView.textStorage?.data(
+            from: NSRange(location: 0, length: textView.textStorage?.length ?? 0),
+            documentAttributes: [.documentType: NSAttributedString.DocumentType.html]
+        ), let str = String(data: data, encoding: .utf8) {
+            html = str
+        } else {
+            html = textView.string.isEmpty ? nil : textView.string
+        }
+        onSaveSignature?(accountId, html)
+        let alert = NSAlert()
+        alert.messageText = "Signature saved"
+        alert.alertStyle = .informational
+        alert.runModal()
+    }
+
+    // MARK: - Other actions
 
     @objc private func addClicked() {
         onAddAccount?()
@@ -196,13 +339,16 @@ final class SettingsWindow: NSObject {
         DisplayPreferences.emailListLimit = selected
     }
 
-    @objc private func saveSignature() {
-        let sig = signatureField?.stringValue ?? ""
-        UserDefaults.standard.set(sig, forKey: "email_signature")
-        let alert = NSAlert()
-        alert.messageText = "Signature saved"
-        alert.alertStyle = .informational
-        alert.runModal()
+    @objc private func undoSendDelayChanged(_ sender: NSPopUpButton) {
+        UserDefaults.standard.set(sender.selectedTag(), forKey: "undo_send_delay")
+    }
+
+    @objc private func imageBlockingChanged(_ sender: NSButton) {
+        switch sender.tag {
+        case 0: DisplayPreferences.remoteImagePolicy = .blockAll
+        case 2: DisplayPreferences.remoteImagePolicy = .allowAll
+        default: DisplayPreferences.remoteImagePolicy = .blockUnknown
+        }
     }
 
     @objc private func saveGoogleClientId() {

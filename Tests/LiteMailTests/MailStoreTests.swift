@@ -191,6 +191,66 @@ final class MailStoreTests: XCTestCase {
         XCTAssertEqual(acct1Results.count, 1)
     }
 
+    // MARK: - Saved Search Tests
+
+    func testSavedSearchCRUD() async throws {
+        let id1 = try await store.insertSavedSearch(accountId: testAccountId, name: "My Search", query: "from:alice")
+        let id2 = try await store.insertSavedSearch(accountId: testAccountId, name: "Unread", query: "is:unread")
+        XCTAssertGreaterThan(id1, 0)
+        XCTAssertGreaterThan(id2, 0)
+
+        let searches = try await store.fetchSavedSearches(accountId: testAccountId)
+        XCTAssertEqual(searches.count, 2)
+        XCTAssertTrue(searches.contains(where: { $0.name == "My Search" }))
+
+        try await store.deleteSavedSearch(id: id1)
+        let remaining = try await store.fetchSavedSearches(accountId: testAccountId)
+        XCTAssertEqual(remaining.count, 1)
+        XCTAssertEqual(remaining[0].name, "Unread")
+    }
+
+    func testSearchWithFromPredicate() async throws {
+        let r1 = makeEmail(messageId: "<from1@test>", subject: "Hello", accountId: testAccountId)
+        var r2 = makeEmail(messageId: "<from2@test>", subject: "World", accountId: testAccountId)
+        r2.senderEmail = "other@example.com"
+        _ = try await store.insertEmail(r1)
+        _ = try await store.insertEmail(r2)
+
+        // r1 uses default sender "sender@example.com", r2 uses "other@example.com"
+        let q = SearchQueryParser.parse("from:sender")
+        let results = try await store.search(parsed: q, accountId: testAccountId)
+        XCTAssertTrue(results.contains(where: { $0.messageId == "<from1@test>" }))
+        XCTAssertFalse(results.contains(where: { $0.messageId == "<from2@test>" }))
+    }
+
+    func testSearchHasAttachment() async throws {
+        var withAtt = makeEmail(messageId: "<att@test>", subject: "Has Attachment", accountId: testAccountId)
+        withAtt.hasAttachments = true
+        _ = try await store.insertEmail(withAtt)
+
+        let noAtt = makeEmail(messageId: "<noatt@test>", subject: "No Attachment", accountId: testAccountId)
+        _ = try await store.insertEmail(noAtt)
+
+        let q = SearchQueryParser.parse("has:attachment")
+        let results = try await store.search(parsed: q, accountId: testAccountId)
+        XCTAssertTrue(results.allSatisfy { $0.hasAttachments })
+    }
+
+    func testSearchOlderThan7Days() async throws {
+        let now = Date()
+        var old = makeEmail(messageId: "<old@test>", subject: "Old Email", accountId: testAccountId)
+        old.date = Int(now.timeIntervalSince1970) - 10 * 86400  // 10 days ago
+        var recent = makeEmail(messageId: "<recent@test>", subject: "Recent Email", accountId: testAccountId)
+        recent.date = Int(now.timeIntervalSince1970) - 3 * 86400  // 3 days ago
+        _ = try await store.insertEmail(old)
+        _ = try await store.insertEmail(recent)
+
+        let q = SearchQueryParser.parse("older_than:7d", now: now)
+        let results = try await store.search(parsed: q, accountId: testAccountId)
+        XCTAssertTrue(results.contains(where: { $0.messageId == "<old@test>" }))
+        XCTAssertFalse(results.contains(where: { $0.messageId == "<recent@test>" }))
+    }
+
     // MARK: - Thread Tests
 
     func testFetchThread() async throws {

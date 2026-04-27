@@ -18,9 +18,19 @@ protocol MailEngineProtocol: Sendable {
     func performIncrementalSync(accountId: String) async throws -> Bool
     func syncAllAccounts() async throws
 
+    // MARK: - Unified Inbox
+
+    func fetchUnifiedInbox(offset: Int, limit: Int) async throws -> [EmailHeader]
+
     // MARK: - Search (cross-account)
 
     func search(query: String, accountId: String?) async throws -> [EmailHeader]
+
+    // MARK: - Saved Searches
+
+    func listSavedSearches(accountId: String?) async throws -> [MailStore.SavedSearchRecord]
+    func saveSearch(accountId: String?, name: String, query: String) async throws -> Int64
+    func deleteSavedSearch(id: Int64) async throws
 
     // MARK: - Read
 
@@ -36,6 +46,17 @@ protocol MailEngineProtocol: Sendable {
     func archive(emailId: Int64) async throws
     func delete(emailId: Int64) async throws
     func move(emailId: Int64, toFolder: String) async throws
+
+    // MARK: - Snooze
+
+    func snooze(emailId: Int64, until: Date) async throws
+    func unsnooze(emailId: Int64) async throws
+    func listSnoozed(accountId: String) async throws -> [EmailHeader]
+
+    // MARK: - Spam
+
+    func markSpam(emailId: Int64) async throws
+    func markSpamBatch(emailIds: [Int64]) async throws
 
     // MARK: - Batch Actions
 
@@ -65,9 +86,30 @@ protocol MailEngineProtocol: Sendable {
 
     func send(message: OutgoingMessage, fromAccountId: String) async throws
     func saveDraft(_ draft: OutgoingMessage, accountId: String) async throws
+
+    // MARK: - Signature
+
+    func signature(accountId: String) async throws -> String?
+    func setSignature(accountId: String, html: String?) async throws
+
+    // MARK: - Scheduled Send
+
+    func scheduleSend(_ msg: OutgoingMessage, fromAccountId: String, sendAt: Date) async throws -> Int64
+    func listScheduled(accountId: String) async throws -> [ScheduledMessage]
+    func cancelScheduled(outboxId: Int64) async throws -> OutboxRecord?
 }
 
 // MARK: - Data Types (used by GUI)
+
+/// A message queued for future delivery. Used by the Scheduled virtual folder.
+struct ScheduledMessage: Sendable, Identifiable {
+    let id: Int64        // outbox row id
+    let to: [String]
+    let subject: String?
+    let sendAfter: Date
+    let bodyText: String?
+    let accountId: String
+}
 
 struct AttachmentInfo: Sendable, Identifiable {
     let id: String  // partId or DB id
@@ -75,6 +117,15 @@ struct AttachmentInfo: Sendable, Identifiable {
     let filename: String?
     let mimeType: String?
     let sizeBytes: Int?
+    let contentId: String?
+    let isInline: Bool
+
+    init(id: String, partId: String, filename: String?, mimeType: String?,
+         sizeBytes: Int?, contentId: String? = nil, isInline: Bool = false) {
+        self.id = id; self.partId = partId; self.filename = filename
+        self.mimeType = mimeType; self.sizeBytes = sizeBytes
+        self.contentId = contentId; self.isInline = isInline
+    }
 }
 
 struct EmailHeader: Sendable, Identifiable {
@@ -91,6 +142,7 @@ struct EmailHeader: Sendable, Identifiable {
     let isStarred: Bool
     let hasAttachments: Bool
     let snippet: String?
+    let recipients: String?
     let deleteState: String
 }
 
@@ -112,6 +164,14 @@ struct OutgoingAttachment: Sendable {
     let filename: String
     let mimeType: String
     let data: Data
+    let contentId: String?
+    let isInline: Bool
+
+    init(filename: String, mimeType: String, data: Data,
+         contentId: String? = nil, isInline: Bool = false) {
+        self.filename = filename; self.mimeType = mimeType; self.data = data
+        self.contentId = contentId; self.isInline = isInline
+    }
 }
 
 struct OutgoingMessage: Sendable {
