@@ -50,6 +50,7 @@ enum GUITestData {
                 isStarred: i == 1,
                 hasAttachments: i == 3,
                 snippet: "Preview of email \(i)...",
+                recipients: "recipient\(i)@example.com",
                 deleteState: "synced"
             )
         }
@@ -83,10 +84,11 @@ enum GUITestData {
                 senderEmail: "thread\(i)@example.com",
                 subject: "Re: Thread Subject",
                 date: Date().addingTimeInterval(Double(i * 3600)),
-                isRead: i < count,  // last email is unread
+                isRead: i < count,
                 isStarred: false,
                 hasAttachments: i == 2,
                 snippet: "Message \(i) preview text...",
+                recipients: "test@example.com",
                 deleteState: "synced"
             )
         }

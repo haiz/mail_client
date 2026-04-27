@@ -1,5 +1,24 @@
 import AppKit
 
+private final class FlippedStackView: NSStackView {
+    override var isFlipped: Bool { true }
+}
+
+/// Custom NSView subclass that accepts first responder so R/A keyboard
+/// shortcuts reach the thread detail pane even when no text field is focused.
+private final class ThreadDetailContainerView: NSView {
+    var onKeyCode: ((UInt16) -> Void)?
+
+    override var acceptsFirstResponder: Bool { true }
+
+    override func keyDown(with event: NSEvent) {
+        switch event.keyCode {
+        case 15, 0: onKeyCode?(event.keyCode)  // r, a
+        default: super.keyDown(with: event)
+        }
+    }
+}
+
 /// Orchestrates a scrollable list of MessageCardViews for thread display.
 /// Replaces the old single-message DetailView.
 final class ThreadDetailView: NSObject {
@@ -8,9 +27,13 @@ final class ThreadDetailView: NSObject {
 
     // Thread content
     private let scrollView: NSScrollView
-    private let stackView: NSStackView
+    private let stackView: FlippedStackView
     private let subjectLabel = NSTextField(labelWithString: "")
+    private let messageCountLabel = NSTextField(labelWithString: "")
     private var cards: [MessageCardView] = []
+
+    // Inline reply
+    private(set) var inlineReplyView: InlineReplyView?
 
     // Empty state
     private let emptyContainer = NSView()
@@ -25,13 +48,18 @@ final class ThreadDetailView: NSObject {
     private let summaryList = NSTextField(labelWithString: "")
 
     // Callbacks
-    var onReply: ((EmailHeader, EmailBody?) -> Void)?
+    var onSendReply: ((OutgoingMessage, @escaping (String?) -> Void) -> Void)?
+    var onSaveDraft: ((OutgoingMessage) -> Void)?
     var onForward: ((EmailHeader, EmailBody?) -> Void)?
     var onArchive: ((Int64) -> Void)?
     var onDelete: ((Int64) -> Void)?
+    var onMarkSpam: ((Int64) -> Void)?
+    var onSnooze: ((Int64, Date) -> Void)?
+    var onShowLabelPicker: ((NSView, Int64) -> Void)?
     var onMove: ((Int64, String) -> Void)?
     var onDownloadAttachment: ((Int64, AttachmentInfo) -> Void)?
     var onFetchBody: ((Int64) -> Void)?
+    var onFetchAttachmentData: ((Int64, String) async throws -> Data)?
 
     /// The current account's email, used for "to me" vs "to recipients" display.
     var accountEmail: String?
@@ -51,10 +79,11 @@ final class ThreadDetailView: NSObject {
     }
 
     override init() {
-        view = NSView()
+        let container = ThreadDetailContainerView()
+        view = container
         view.wantsLayer = true
 
-        stackView = NSStackView()
+        stackView = FlippedStackView()
         stackView.orientation = .vertical
         stackView.spacing = 1
         stackView.alignment = .leading
@@ -69,6 +98,15 @@ final class ThreadDetailView: NSObject {
 
         super.init()
 
+        container.onKeyCode = { [weak self] keyCode in
+            guard let self, let lastCard = self.cards.last else { return }
+            switch keyCode {
+            case 15: self.openInlineReply(header: lastCard.messageHeader, body: lastCard.cachedBody, mode: .reply)
+            case 0: self.openInlineReply(header: lastCard.messageHeader, body: lastCard.cachedBody, mode: .replyAll)
+            default: break
+            }
+        }
+
         setupLayout()
         showEmpty()
     }
@@ -81,7 +119,14 @@ final class ThreadDetailView: NSObject {
         subjectLabel.lineBreakMode = .byWordWrapping
         subjectLabel.maximumNumberOfLines = 2
         subjectLabel.textColor = .labelColor
+
+        messageCountLabel.translatesAutoresizingMaskIntoConstraints = false
+        messageCountLabel.font = .systemFont(ofSize: 12)
+        messageCountLabel.textColor = .secondaryLabelColor
+        messageCountLabel.isHidden = true
+
         view.addSubview(subjectLabel)
+        view.addSubview(messageCountLabel)
         view.addSubview(scrollView)
 
         NSLayoutConstraint.activate([
@@ -89,7 +134,11 @@ final class ThreadDetailView: NSObject {
             subjectLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 28),
             subjectLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -28),
 
-            scrollView.topAnchor.constraint(equalTo: subjectLabel.bottomAnchor, constant: 16),
+            messageCountLabel.topAnchor.constraint(equalTo: subjectLabel.bottomAnchor, constant: 4),
+            messageCountLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 28),
+            messageCountLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -28),
+
+            scrollView.topAnchor.constraint(equalTo: messageCountLabel.bottomAnchor, constant: 12),
             scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
             scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
             scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -8),
@@ -194,6 +243,11 @@ final class ThreadDetailView: NSObject {
     // MARK: - Display
 
     func display(thread headers: [EmailHeader], subject: String) {
+        // Preserve any pending draft before clearing the inline reply
+        inlineReplyView?.forceSaveDraft()
+        inlineReplyView?.view.removeFromSuperview()
+        inlineReplyView = nil
+
         emptyContainer.isHidden = true
         summaryContainer.isHidden = true
         subjectLabel.isHidden = false
@@ -201,9 +255,23 @@ final class ThreadDetailView: NSObject {
 
         subjectLabel.stringValue = subject
 
+        let unreadCount = headers.filter { !$0.isRead }.count
+        let total = headers.count
+        if total > 0 {
+            let unreadPart = unreadCount > 0 ? ", \(unreadCount) unread" : ""
+            messageCountLabel.stringValue = "\(total) message\(total == 1 ? "" : "s")\(unreadPart)"
+            messageCountLabel.isHidden = false
+        } else {
+            messageCountLabel.isHidden = true
+        }
+
         // Clear old cards
         cards.forEach { $0.view.removeFromSuperview() }
         cards.removeAll()
+
+        // Reset scroll to top for the new thread
+        scrollView.contentView.scroll(to: .zero)
+        scrollView.reflectScrolledClipView(scrollView.contentView)
 
         // Create cards — newest is last in array (sorted date ASC)
         let lastIndex = headers.count - 1
@@ -219,17 +287,34 @@ final class ThreadDetailView: NSObject {
                     self?.onFetchBody?(header.id)
                 }
             }
-            card.onReply = { [weak self] h, b in self?.onReply?(h, b) }
+            card.onReply = { [weak self] h, b in
+                self?.openInlineReply(header: h, body: b, mode: .reply)
+            }
+            card.onReplyAll = { [weak self] h, b in
+                self?.openInlineReply(header: h, body: b, mode: .replyAll)
+            }
             card.onForward = { [weak self] h, b in self?.onForward?(h, b) }
             card.onArchive = { [weak self] id in self?.onArchive?(id) }
+            card.onSnooze = { [weak self] id, date in self?.onSnooze?(id, date) }
+            card.onShowLabelPicker = { [weak self] view, id in self?.onShowLabelPicker?(view, id) }
             card.onDelete = { [weak self] id in self?.onDelete?(id) }
+            card.onMarkSpam = { [weak self] id in self?.onMarkSpam?(id) }
             card.onMove = { [weak self] id, f in self?.onMove?(id, f) }
             card.onDownloadAttachment = { [weak self] att in self?.onDownloadAttachment?(header.id, att) }
+            card.onFetchAttachmentData = { [weak self] emailId, partId in
+                guard let fetch = self?.onFetchAttachmentData else { throw URLError(.fileDoesNotExist) }
+                return try await fetch(emailId, partId)
+            }
             card.availableFolders = availableFolders
 
             card.view.translatesAutoresizingMaskIntoConstraints = false
             stackView.addArrangedSubview(card.view)
             card.view.widthAnchor.constraint(equalTo: stackView.widthAnchor).isActive = true
+            if shouldExpand {
+                let hc = card.view.heightAnchor.constraint(greaterThanOrEqualTo: scrollView.contentView.heightAnchor)
+                hc.priority = NSLayoutConstraint.Priority(rawValue: 750)
+                hc.isActive = true
+            }
 
             // Request body for auto-expanded cards
             if shouldExpand {
@@ -242,6 +327,8 @@ final class ThreadDetailView: NSObject {
     }
 
     func clear() {
+        inlineReplyView?.view.removeFromSuperview()
+        inlineReplyView = nil
         cards.forEach { $0.view.removeFromSuperview() }
         cards.removeAll()
         showEmpty()
@@ -251,6 +338,7 @@ final class ThreadDetailView: NSObject {
         emptyContainer.isHidden = false
         summaryContainer.isHidden = true
         subjectLabel.isHidden = true
+        messageCountLabel.isHidden = true
         scrollView.isHidden = true
     }
 
@@ -268,6 +356,7 @@ final class ThreadDetailView: NSObject {
         summaryContainer.isHidden = false
         emptyContainer.isHidden = true
         subjectLabel.isHidden = true
+        messageCountLabel.isHidden = true
         scrollView.isHidden = true
     }
 
@@ -282,5 +371,45 @@ final class ThreadDetailView: NSObject {
             card.displayAttachments(attachments)
             return
         }
+    }
+
+    // MARK: - Inline Reply
+
+    func openInlineReply(header: EmailHeader, body: EmailBody?, mode: InlineReplyView.Mode) {
+        // Save any existing draft before replacing
+        inlineReplyView?.forceSaveDraft()
+        inlineReplyView?.view.removeFromSuperview()
+        inlineReplyView = nil
+
+        let reply = InlineReplyView(header: header, body: body, mode: mode, accountEmail: accountEmail)
+        reply.onSend = { [weak self] message, completion in
+            self?.onSendReply?(message, completion)
+        }
+        reply.onSaveDraft = { [weak self] draft in
+            self?.onSaveDraft?(draft)
+        }
+        reply.onDiscard = { [weak self] in
+            self?.inlineReplyView?.view.removeFromSuperview()
+            self?.inlineReplyView = nil
+        }
+
+        inlineReplyView = reply
+        reply.view.translatesAutoresizingMaskIntoConstraints = false
+        stackView.addArrangedSubview(reply.view)
+        reply.view.widthAnchor.constraint(equalTo: stackView.widthAnchor).isActive = true
+
+        DispatchQueue.main.async { [weak self, weak reply] in
+            self?.scrollToBottom()
+            if let window = self?.view.window, let reply {
+                reply.focusBody(in: window)
+            }
+        }
+    }
+
+    private func scrollToBottom() {
+        guard let docView = scrollView.documentView else { return }
+        let pt = NSPoint(x: 0, y: max(0, docView.frame.maxY - scrollView.contentView.bounds.height))
+        scrollView.contentView.scroll(to: pt)
+        scrollView.reflectScrolledClipView(scrollView.contentView)
     }
 }

@@ -56,9 +56,9 @@ final class MessageListTests: XCTestCase {
         let messageList = MessageListView()
 
         let headers = [
-            EmailHeader(id: 1, accountId: "acc1", messageId: "<t1@test>", threadId: "thread-A", folder: "INBOX", senderName: "Alice", senderEmail: "alice@test.com", subject: "Thread topic", date: Date(), isRead: false, isStarred: false, hasAttachments: false, snippet: nil, deleteState: "synced"),
-            EmailHeader(id: 2, accountId: "acc1", messageId: "<t2@test>", threadId: "thread-A", folder: "INBOX", senderName: "Bob", senderEmail: "bob@test.com", subject: "Re: Thread topic", date: Date().addingTimeInterval(60), isRead: false, isStarred: false, hasAttachments: false, snippet: nil, deleteState: "synced"),
-            EmailHeader(id: 3, accountId: "acc1", messageId: "<t3@test>", threadId: "thread-B", folder: "INBOX", senderName: "Carol", senderEmail: "carol@test.com", subject: "Other thread", date: Date(), isRead: false, isStarred: false, hasAttachments: false, snippet: nil, deleteState: "synced"),
+            EmailHeader(id: 1, accountId: "acc1", messageId: "<t1@test>", threadId: "thread-A", folder: "INBOX", senderName: "Alice", senderEmail: "alice@test.com", subject: "Thread topic", date: Date(), isRead: false, isStarred: false, hasAttachments: false, snippet: nil, recipients: nil, deleteState: "synced"),
+            EmailHeader(id: 2, accountId: "acc1", messageId: "<t2@test>", threadId: "thread-A", folder: "INBOX", senderName: "Bob", senderEmail: "bob@test.com", subject: "Re: Thread topic", date: Date().addingTimeInterval(60), isRead: false, isStarred: false, hasAttachments: false, snippet: nil, recipients: nil, deleteState: "synced"),
+            EmailHeader(id: 3, accountId: "acc1", messageId: "<t3@test>", threadId: "thread-B", folder: "INBOX", senderName: "Carol", senderEmail: "carol@test.com", subject: "Other thread", date: Date(), isRead: false, isStarred: false, hasAttachments: false, snippet: nil, recipients: nil, deleteState: "synced"),
         ]
 
         messageList.update(messages: headers)
