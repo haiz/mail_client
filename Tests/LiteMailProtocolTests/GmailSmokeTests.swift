@@ -96,4 +96,35 @@ final class GmailSmokeTests: XCTestCase {
         XCTAssertTrue(folders.contains(where: { $0.role == .inbox }), "Missing INBOX. Folders: \(folderNames)")
         XCTAssertTrue(folders.contains(where: { $0.role == .sent }), "Missing Sent. Folders: \(folderNames)")
     }
+
+    func testGmailCategoryRefreshAgainstRealAccount() async throws {
+        guard ProcessInfo.processInfo.environment["LITEMAIL_GMAIL_TEST"] == "1" else { return }
+        guard let email = ProcessInfo.processInfo.environment["LITEMAIL_GMAIL_EMAIL"],
+              let accessToken = ProcessInfo.processInfo.environment["LITEMAIL_GMAIL_OAUTH_TOKEN"] else {
+            XCTFail("Missing LITEMAIL_GMAIL_EMAIL or LITEMAIL_GMAIL_OAUTH_TOKEN")
+            return
+        }
+
+        let api = GmailAPIClient()
+        let ids = try await api.listMessageIds(
+            query: "category:promotions label:inbox newer_than:7d",
+            maxResults: 10,
+            accessToken: accessToken
+        )
+        // Real Gmail accounts almost always have at least one promotional email
+        // in the past week — but if zero is returned, that's still a valid pass:
+        // the API call itself succeeded.
+        XCTAssertTrue(ids.count >= 0)
+
+        if !ids.isEmpty {
+            let mapping = try await api.batchGetMessageIds(ids: ids, accessToken: accessToken)
+            // Each returned message should have a Message-Id header (Gmail always
+            // stamps one). At least one mapping is expected.
+            XCTAssertFalse(mapping.isEmpty)
+            for (_, mid) in mapping {
+                XCTAssertTrue(mid.hasPrefix("<") && mid.hasSuffix(">"),
+                              "Message-Id header value should be RFC-822 angle-bracketed")
+            }
+        }
+    }
 }

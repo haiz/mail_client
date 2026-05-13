@@ -8,6 +8,7 @@ actor AccountManager: MailEngineProtocol {
 
     let store: MailStore
     let authManager: AuthManager
+    let categoriesRefresher: CategoriesRefresher?
 
     typealias ProviderFactory = @Sendable (AccountConfig, AuthManager, MailStore) -> any MailProvider
 
@@ -16,10 +17,16 @@ actor AccountManager: MailEngineProtocol {
     private let providerFactory: ProviderFactory?
     let deleteWorker: DeleteWorker
 
-    init(store: MailStore, authManager: AuthManager, providerFactory: ProviderFactory? = nil) {
+    init(
+        store: MailStore,
+        authManager: AuthManager,
+        providerFactory: ProviderFactory? = nil,
+        categoriesRefresher: CategoriesRefresher? = nil
+    ) {
         self.store = store
         self.authManager = authManager
         self.providerFactory = providerFactory
+        self.categoriesRefresher = categoriesRefresher
         // providerLookup is a temporary no-op; replaced in startDeleteWorker().
         self.deleteWorker = DeleteWorker(
             store: store,
@@ -109,6 +116,7 @@ actor AccountManager: MailEngineProtocol {
         try await provider.connect()
         try await provider.performInitialSync()
         try await store.warmSearchCache()
+        await refreshCategoriesIfApplicable(accountId: accountId)
     }
 
     /// Returns `true` when a provider was found and sync was attempted.
@@ -116,6 +124,7 @@ actor AccountManager: MailEngineProtocol {
     func performIncrementalSync(accountId: String) async throws -> Bool {
         guard let provider = providers[accountId] else { return false }
         try await provider.performIncrementalSync()
+        await refreshCategoriesIfApplicable(accountId: accountId)
         return true
     }
 
@@ -126,6 +135,7 @@ actor AccountManager: MailEngineProtocol {
                     try await provider.connect()
                 }
                 try await provider.performIncrementalSync()
+                await refreshCategoriesIfApplicable(accountId: accountId)
             } catch {
                 // Log but don't block other accounts
                 print("Sync failed for account \(accountId): \(error)")
@@ -195,14 +205,14 @@ actor AccountManager: MailEngineProtocol {
     // MARK: - Read
 
     func fetchHeaders(accountId: String, folder: String, offset: Int, limit: Int) async throws -> [EmailHeader] {
-        // Use concurrent reader to avoid blocking behind sync writes on the actor.
-        let records = try store.concurrentReader.read { db in
-            try EmailRecord
-                .filter(Column("account_id") == accountId && Column("folder") == folder && Column("is_deleted") == false)
-                .order(Column("date").desc)
-                .limit(limit, offset: offset)
-                .fetchAll(db)
+        var resolvedFolder = folder
+        if folder == "INBOX", try await isGmailAccount(accountId: accountId) {
+            resolvedFolder = GmailCategory.personal.virtualFolderId
         }
+        let records = try await store.fetchHeaders(
+            accountId: accountId, folder: resolvedFolder,
+            offset: offset, limit: limit
+        )
         return records.map(Self.recordToHeader)
     }
 
@@ -268,6 +278,36 @@ actor AccountManager: MailEngineProtocol {
         let snoozed = MailFolder(id: "__snoozed__", name: "Snoozed",
                                  totalCount: snoozedCount, unreadCount: 0, role: .snoozed)
         result.append(snoozed)
+
+        // Synthesize Gmail category virtual folders for Gmail accounts only.
+        if (try? await isGmailAccount(accountId: accountId)) == true {
+            let counts = (try? await store.gmailCategoryCounts(accountId: accountId)) ?? [:]
+            let categoryEntries: [MailFolder] = GmailCategory.allCases.compactMap { cat -> MailFolder? in
+                guard cat != .personal else { return nil }
+                let c = counts[cat.rawValue] ?? (total: 0, unread: 0)
+                return MailFolder(
+                    id: cat.virtualFolderId,
+                    name: Self.displayNameForCategory(cat),
+                    totalCount: c.total,
+                    unreadCount: c.unread,
+                    role: .category
+                )
+            }
+            result.append(contentsOf: categoryEntries)
+
+            // Override the existing INBOX entry's count with Primary-only count.
+            let primary = counts[GmailCategory.personal.rawValue] ?? (total: 0, unread: 0)
+            if let inboxIdx = result.firstIndex(where: { $0.id == "INBOX" }) {
+                let original = result[inboxIdx]
+                result[inboxIdx] = MailFolder(
+                    id: original.id,
+                    name: original.name,
+                    totalCount: primary.total,
+                    unreadCount: primary.unread,
+                    role: original.role
+                )
+            }
+        }
 
         return result
     }
@@ -679,6 +719,26 @@ actor AccountManager: MailEngineProtocol {
 
     // MARK: - Helpers
 
+    /// Best-effort Gmail category refresh. Errors are swallowed so sync
+    /// success is never gated on categorization.
+    private func refreshCategoriesIfApplicable(accountId: String) async {
+        guard let refresher = categoriesRefresher else { return }
+        guard (try? await isGmailAccount(accountId: accountId)) == true else { return }
+        do {
+            try await refresher.refresh(accountId: accountId)
+        } catch {
+            // Service-level errors are already logged inside the refresher.
+            // Sync success is independent of categorization.
+        }
+    }
+
+    private func isGmailAccount(accountId: String) async throws -> Bool {
+        guard let record = try await store.getAccount(id: accountId) else { return false }
+        let email = record.emailAddress.lowercased()
+        let isGmailDomain = email.hasSuffix("@gmail.com") || email.hasSuffix("@googlemail.com")
+        return isGmailDomain && record.authType == "oauth2"
+    }
+
     private func createProvider(for config: AccountConfig) -> any MailProvider {
         if let factory = providerFactory {
             return factory(config, authManager, store)
@@ -746,6 +806,17 @@ actor AccountManager: MailEngineProtocol {
         }
     }
 
+    private static func displayNameForCategory(_ category: GmailCategory) -> String {
+        switch category {
+        case .personal:   return "Primary"
+        case .promotions: return "Promotions"
+        case .social:     return "Social"
+        case .updates:    return "Updates"
+        case .forums:     return "Forums"
+        case .purchases:  return "Purchases"
+        }
+    }
+
     static func folderRole(for folderId: String) -> FolderRole? {
         switch folderId {
         case "INBOX": return .inbox
@@ -757,6 +828,7 @@ actor AccountManager: MailEngineProtocol {
         case "[Gmail]/Spam", "Spam", "Junk": return .spam
         default:
             if folderId.hasPrefix("[Gmail]/Category/") { return .category }
+            if GmailCategory(virtualFolderId: folderId) != nil { return .category }
             return nil
         }
     }

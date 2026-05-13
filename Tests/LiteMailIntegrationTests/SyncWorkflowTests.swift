@@ -154,4 +154,180 @@ final class SyncWorkflowTests: XCTestCase {
         XCTAssertTrue(calls1.contains("performIncrementalSync") || calls1.contains("performInitialSync"))
         XCTAssertTrue(calls2.contains("performIncrementalSync") || calls2.contains("performInitialSync"))
     }
+
+    // MARK: - Gmail Category Folder Synthesis
+
+    func testListFoldersForGmailAccountIncludesFiveCategoryVirtualFolders() async throws {
+        let store = try MailStore(path: ":memory:")
+        let auth = AuthManager()
+        let acc = AccountRecord(
+            id: "gmail1", emailAddress: "u@gmail.com",
+            protocolType: "imap", authType: "oauth2",
+            keychainRef: "k", isDefault: true
+        )
+        try await store.insertAccount(acc)
+        // Pretend INBOX has been synced (so listFolders returns it).
+        try await store.updateSyncState(SyncStateRecord(
+            accountId: "gmail1", folder: "INBOX",
+            uidValidity: nil, lastUid: nil, lastSync: 0
+        ))
+        let mgr = AccountManager(
+            store: store, authManager: auth,
+            providerFactory: { config, _, _ in MockMailProvider(accountId: config.id) }
+        )
+        try await mgr.loadAccounts()
+
+        let folders = try await mgr.listFolders(accountId: "gmail1")
+        let categoryIds = folders.filter { $0.role == .category }.map { $0.id }
+        XCTAssertEqual(categoryIds.count, 5)
+        XCTAssertTrue(categoryIds.contains("gmail:category:promotions"))
+        XCTAssertTrue(categoryIds.contains("gmail:category:social"))
+        XCTAssertTrue(categoryIds.contains("gmail:category:updates"))
+        XCTAssertTrue(categoryIds.contains("gmail:category:forums"))
+        XCTAssertTrue(categoryIds.contains("gmail:category:purchases"))
+    }
+
+    func testListFoldersForNonGmailAccountDoesNotIncludeCategories() async throws {
+        let store = try MailStore(path: ":memory:")
+        let auth = AuthManager()
+        let acc = AccountRecord(
+            id: "imap1", emailAddress: "u@example.com",
+            protocolType: "imap", imapHost: "imap.example.com",
+            authType: "password", keychainRef: "k", isDefault: true
+        )
+        try await store.insertAccount(acc)
+        try await store.updateSyncState(SyncStateRecord(
+            accountId: "imap1", folder: "INBOX",
+            uidValidity: nil, lastUid: nil, lastSync: 0
+        ))
+        let mgr = AccountManager(
+            store: store, authManager: auth,
+            providerFactory: { config, _, _ in MockMailProvider(accountId: config.id) }
+        )
+        try await mgr.loadAccounts()
+
+        let folders = try await mgr.listFolders(accountId: "imap1")
+        XCTAssertFalse(folders.contains { $0.id.hasPrefix("gmail:category:") })
+    }
+
+    func testFetchHeadersForGmailInboxRoutesToPrimary() async throws {
+        let store = try MailStore(path: ":memory:")
+        let auth = AuthManager()
+        let acc = AccountRecord(
+            id: "gmail2", emailAddress: "u@gmail.com",
+            protocolType: "imap", authType: "oauth2",
+            keychainRef: "k", isDefault: true
+        )
+        try await store.insertAccount(acc)
+        // Insert one promotions message (must NOT appear in Inbox/Primary)
+        // and one personal message (must appear).
+        var p = EmailRecord(
+            messageId: "<p@x>", folder: "INBOX",
+            senderEmail: "x@gmail.com", subject: "promo",
+            date: 0, isRead: false, isStarred: false, isDeleted: false,
+            hasAttachments: false, accountId: "gmail2"
+        )
+        p.uid = 1; p.gmailCategory = "promotions"
+        var pers = EmailRecord(
+            messageId: "<pers@x>", folder: "INBOX",
+            senderEmail: "x@gmail.com", subject: "personal",
+            date: 0, isRead: false, isStarred: false, isDeleted: false,
+            hasAttachments: false, accountId: "gmail2"
+        )
+        pers.uid = 2; pers.gmailCategory = "personal"
+        _ = try await store.insertEmail(p)
+        _ = try await store.insertEmail(pers)
+
+        let mgr = AccountManager(
+            store: store, authManager: auth,
+            providerFactory: { config, _, _ in MockMailProvider(accountId: config.id) }
+        )
+        try await mgr.loadAccounts()
+
+        let headers = try await mgr.fetchHeaders(
+            accountId: "gmail2", folder: "INBOX", offset: 0, limit: 10
+        )
+        let ids = Set(headers.map { $0.messageId })
+        XCTAssertEqual(ids, ["<pers@x>"])
+    }
+
+    // MARK: - CategoriesRefresher Sync Hooks
+
+    func testRefreshCategoriesIsCalledAfterIncrementalSyncForGmailAccount() async throws {
+        let store = try MailStore(path: ":memory:")
+        let auth = AuthManager()
+        let acc = AccountRecord(
+            id: "gmail3", emailAddress: "u@gmail.com",
+            protocolType: "imap", imapHost: "imap.gmail.com",
+            authType: "oauth2", keychainRef: "k", isDefault: true
+        )
+        try await store.insertAccount(acc)
+
+        let spy = SpyCategoriesRefresher()
+        let mgr = AccountManager(
+            store: store, authManager: auth,
+            providerFactory: { config, _, _ in MockMailProvider(accountId: config.id) },
+            categoriesRefresher: spy
+        )
+        try await mgr.loadAccounts()
+
+        try await mgr.performIncrementalSync(accountId: "gmail3")
+
+        let calls = await spy.calls
+        XCTAssertEqual(calls, ["gmail3"])
+    }
+
+    func testRefreshCategoriesIsCalledAfterInitialSyncForGmailAccount() async throws {
+        let store = try MailStore(path: ":memory:")
+        let auth = AuthManager()
+        let acc = AccountRecord(
+            id: "gmail4", emailAddress: "u@gmail.com",
+            protocolType: "imap", imapHost: "imap.gmail.com",
+            authType: "oauth2", keychainRef: "k", isDefault: true
+        )
+        try await store.insertAccount(acc)
+
+        let spy = SpyCategoriesRefresher()
+        let mgr = AccountManager(
+            store: store, authManager: auth,
+            providerFactory: { config, _, _ in MockMailProvider(accountId: config.id) },
+            categoriesRefresher: spy
+        )
+        try await mgr.loadAccounts()
+
+        try await mgr.performInitialSync(accountId: "gmail4")
+        let calls = await spy.calls
+        XCTAssertEqual(calls, ["gmail4"])
+    }
+
+    func testRefreshCategoriesIsNotCalledForNonGmailAccount() async throws {
+        let store = try MailStore(path: ":memory:")
+        let auth = AuthManager()
+        let acc = AccountRecord(
+            id: "imap2", emailAddress: "u@example.com",
+            protocolType: "imap", imapHost: "imap.example.com",
+            authType: "password", keychainRef: "k", isDefault: true
+        )
+        try await store.insertAccount(acc)
+
+        let spy = SpyCategoriesRefresher()
+        let mgr = AccountManager(
+            store: store, authManager: auth,
+            providerFactory: { config, _, _ in MockMailProvider(accountId: config.id) },
+            categoriesRefresher: spy
+        )
+        try await mgr.loadAccounts()
+
+        try await mgr.performIncrementalSync(accountId: "imap2")
+        let calls = await spy.calls
+        XCTAssertTrue(calls.isEmpty)
+    }
+}
+
+/// Spy actor implementing CategoriesRefresher protocol — captures call history.
+actor SpyCategoriesRefresher: CategoriesRefresher {
+    private(set) var calls: [String] = []
+    func refresh(accountId: String) async throws {
+        calls.append(accountId)
+    }
 }

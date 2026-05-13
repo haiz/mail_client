@@ -450,6 +450,22 @@ actor MailStore {
             """)
         }
 
+        // v15: Gmail Categories.
+        // Adds gmail_category column for storing Gmail's inbox categorization
+        // (Personal/Primary, Promotions, Social, Updates, Forums, Purchases).
+        // NULL = not a Gmail account, or not yet classified, or no category.
+        // Renumbered from v8 to avoid collision with v8_snippet on main.
+        migrator.registerMigration("v15_gmail_category") { db in
+            try db.alter(table: "emails") { t in
+                t.add(column: "gmail_category", .text)
+            }
+            try db.create(
+                index: "idx_emails_account_category",
+                on: "emails",
+                columns: ["account_id", "gmail_category"]
+            )
+        }
+
         try migrator.migrate(dbPool)
     }
 
@@ -683,9 +699,26 @@ actor MailStore {
 
     func fetchHeaders(accountId: String, folder: String, offset: Int, limit: Int) throws -> [EmailRecord] {
         try dbPool.read { db in
-            // Join through email_folders so each result reflects the queried folder's uid context,
-            // which is needed for subsequent IMAP move/delete operations on that specific folder.
-            try EmailRecord.fetchAll(db, sql: """
+            // Gmail category virtual folder — filter by gmail_category within INBOX.
+            // These virtual IDs (e.g. "gmail:category:promotions") have no rows in
+            // email_folders, so we query directly on the emails table.
+            if let category = GmailCategory(virtualFolderId: folder) {
+                let inboxFilter = Column("folder") == "INBOX"
+                let categoryFilter: SQLExpression = category == .personal
+                    ? inboxFilter && (Column("gmail_category") == category.rawValue || Column("gmail_category") == nil)
+                    : inboxFilter && Column("gmail_category") == category.rawValue
+                return try EmailRecord
+                    .filter(Column("account_id") == accountId
+                        && Column("is_deleted") == false
+                        && Column("delete_state") != "pending_delete"
+                        && categoryFilter)
+                    .order(Column("date").desc)
+                    .limit(limit, offset: offset)
+                    .fetchAll(db)
+            }
+            // Regular folder — join through email_folders so each result reflects
+            // the queried folder's uid context (needed for IMAP move/delete ops).
+            return try EmailRecord.fetchAll(db, sql: """
                 SELECT e.id, e.message_id, e.thread_id,
                        ef.folder AS folder,
                        e.sender_name, e.sender_email, e.recipients, e.subject, e.date,
@@ -701,6 +734,20 @@ actor MailStore {
                 ORDER BY e.date DESC
                 LIMIT ? OFFSET ?
             """, arguments: [accountId, folder, limit, offset])
+        }
+    }
+
+    /// Sets `gmail_category` for the message with the given account_id + message_id.
+    /// Silent no-op if no row matches. Used by GmailCategoriesService after sync.
+    func setGmailCategory(accountId: String, messageId: String, category: String) throws {
+        try dbPool.write { db in
+            // A message may appear in multiple folders for the same account (Gmail
+            // multi-label). All folder-copies get the same category — correct since
+            // the category is a property of the message, not the folder view.
+            try db.execute(
+                sql: "UPDATE emails SET gmail_category = ? WHERE account_id = ? AND message_id = ?",
+                arguments: [category, accountId, messageId]
+            )
         }
     }
 
@@ -1304,6 +1351,39 @@ actor MailStore {
         }
     }
 
+    /// Returns total + unread counts per Gmail category for INBOX of the given account.
+    /// All 6 categories are always present in the dictionary, possibly with zero counts.
+    /// NULL `gmail_category` is bucketed as `personal` (matches Primary tab semantics).
+    func gmailCategoryCounts(accountId: String) throws -> [String: (total: Int, unread: Int)] {
+        try dbPool.read { db in
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT
+                    COALESCE(gmail_category, 'personal') AS category,
+                    COUNT(*) AS total,
+                    COALESCE(SUM(CASE WHEN is_read = 0 THEN 1 ELSE 0 END), 0) AS unread
+                FROM emails
+                WHERE account_id = ?
+                  AND folder = 'INBOX'
+                  AND is_deleted = 0
+                  AND delete_state <> 'pending_delete'
+                GROUP BY COALESCE(gmail_category, 'personal')
+            """, arguments: [accountId])
+
+            var result: [String: (total: Int, unread: Int)] = [:]
+            for c in GmailCategory.allCases {
+                result[c.rawValue] = (total: 0, unread: 0)
+            }
+            for row in rows {
+                let cat: String = row["category"]
+                // Defensively skip rows whose category isn't in the known set
+                // (e.g. legacy or corrupt data) — they don't fit any virtual folder.
+                guard GmailCategory(rawValue: cat) != nil else { continue }
+                result[cat] = (total: row["total"], unread: row["unread"])
+            }
+            return result
+        }
+    }
+
     // MARK: - Sync State
 
     func getSyncState(accountId: String, folder: String) throws -> SyncStateRecord? {
@@ -1553,6 +1633,7 @@ struct EmailRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var accountId: String?
     var deleteState: String = "synced"
     var snippet: String?
+    var gmailCategory: String?
 
     enum CodingKeys: String, CodingKey {
         case id, folder, subject, date, uid, flags, recipients, snippet
@@ -1569,6 +1650,7 @@ struct EmailRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         case createdAt = "created_at"
         case accountId = "account_id"
         case deleteState = "delete_state"
+        case gmailCategory = "gmail_category"
     }
 }
 

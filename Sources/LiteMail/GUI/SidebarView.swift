@@ -352,8 +352,15 @@ final class SidebarView: NSObject {
     }
 
     private static func iconForCategory(_ folderId: String) -> String {
-        let name = folderId.split(separator: "/").last.map(String.init)?.lowercased() ?? ""
+        let name: String
+        if let cat = GmailCategory(virtualFolderId: folderId) {
+            name = cat.rawValue
+        } else {
+            // Legacy "[Gmail]/Category/Promotions" path
+            name = folderId.split(separator: "/").last.map(String.init)?.lowercased() ?? ""
+        }
         switch name {
+        case "personal":   return "tray.fill"
         case "social":     return "person.2.fill"
         case "promotions": return "tag.fill"
         case "updates":    return "bell.fill"

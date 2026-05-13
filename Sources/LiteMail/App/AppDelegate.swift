@@ -220,7 +220,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         do {
             let store = try MailStore(path: dbPath)
             let authManager = AuthManager()
-            let manager = AccountManager(store: store, authManager: authManager)
+            let categoriesService = GmailCategoriesService(
+                client: GmailAPIClient(),
+                store: store,
+                tokenProvider: authManager
+            )
+            let manager = AccountManager(
+                store: store, authManager: authManager,
+                categoriesRefresher: categoriesService
+            )
             self.accountManager = manager
             self.contactsStore = ContactsStore(mailStore: store, authManager: authManager)
 
