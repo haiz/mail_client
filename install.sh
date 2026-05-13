@@ -20,10 +20,6 @@ ok()    { echo -e "${GREEN}==>${NC} $1"; }
 warn()  { echo -e "${YELLOW}==>${NC} $1"; }
 error() { echo -e "${RED}==>${NC} $1"; exit 1; }
 
-# Detach stdin from the pipe so subcommands don't consume bytes bash needs to
-# read the rest of this script (bash 3.2 on macOS reads stdin in small chunks).
-exec < /dev/null
-
 # --- Pre-flight checks ---
 [[ "$(uname)" == "Darwin" ]] || error "This app requires macOS."
 
