@@ -5,7 +5,7 @@ A fast, keyboard-driven macOS mail client. 3-pane layout, native AppKit, IMAP + 
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/haiz/mail_client/feat/thread-conversation-view/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/haiz/mail_client/main/install.sh | bash
 ```
 
 Requires macOS 14 (Sonoma) or later.
