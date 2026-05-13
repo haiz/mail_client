@@ -725,7 +725,7 @@ actor MailStore {
                        e.is_read, e.is_starred, e.is_deleted, e.has_attachments,
                        ef.uid AS uid,
                        e.flags, e.references_header, e.in_reply_to, e.created_at,
-                       e.account_id, e.delete_state, e.snippet
+                       e.account_id, e.delete_state, e.snippet, e.gmail_category
                 FROM emails e
                 JOIN email_folders ef ON ef.email_id = e.id
                 WHERE e.account_id = ? AND ef.folder = ?
@@ -792,7 +792,7 @@ actor MailStore {
                        e.is_read, e.is_starred, e.is_deleted, e.has_attachments,
                        ef.uid AS uid,
                        e.flags, e.references_header, e.in_reply_to, e.created_at,
-                       e.account_id, e.delete_state, e.snippet
+                       e.account_id, e.delete_state, e.snippet, e.gmail_category
                 FROM emails e
                 JOIN email_folders ef ON ef.email_id = e.id
                 WHERE e.account_id IN (\(placeholders))

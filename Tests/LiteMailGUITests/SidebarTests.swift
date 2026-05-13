@@ -77,12 +77,12 @@ final class SidebarTests: XCTestCase {
         // Simulate AccountManager.listFolders output for a Gmail account: standard
         // Inbox + 5 category virtual folders.
         let folders: [MailFolder] = [
-            MailFolder(id: "INBOX", name: "Inbox", totalCount: 0, hasUnread: false, role: .inbox),
-            MailFolder(id: "gmail:category:promotions", name: "Promotions", totalCount: 0, hasUnread: false, role: .category),
-            MailFolder(id: "gmail:category:social",     name: "Social",     totalCount: 0, hasUnread: false, role: .category),
-            MailFolder(id: "gmail:category:updates",    name: "Updates",    totalCount: 0, hasUnread: false, role: .category),
-            MailFolder(id: "gmail:category:forums",     name: "Forums",     totalCount: 0, hasUnread: false, role: .category),
-            MailFolder(id: "gmail:category:purchases",  name: "Purchases",  totalCount: 0, hasUnread: false, role: .category),
+            MailFolder(id: "INBOX", name: "Inbox", totalCount: 0, unreadCount: 0, role: .inbox),
+            MailFolder(id: "gmail:category:promotions", name: "Promotions", totalCount: 0, unreadCount: 0, role: .category),
+            MailFolder(id: "gmail:category:social",     name: "Social",     totalCount: 0, unreadCount: 0, role: .category),
+            MailFolder(id: "gmail:category:updates",    name: "Updates",    totalCount: 0, unreadCount: 0, role: .category),
+            MailFolder(id: "gmail:category:forums",     name: "Forums",     totalCount: 0, unreadCount: 0, role: .category),
+            MailFolder(id: "gmail:category:purchases",  name: "Purchases",  totalCount: 0, unreadCount: 0, role: .category),
         ]
         sidebar.updateFolders(folders)
         pumpRunLoop()
@@ -90,8 +90,8 @@ final class SidebarTests: XCTestCase {
         // Selecting one of the synthesized virtual folders fires the callback
         // with the correct ID.
         var selected: (String, String)?
-        sidebar.onFolderSelected = { acct, fid in selected = (acct, fid) }
-        sidebar.onFolderSelected?("g1", "gmail:category:promotions")
+        sidebar.onFolderSelected = { acct, fid, _ in selected = (acct, fid) }
+        sidebar.onFolderSelected?("g1", "gmail:category:promotions", 0)
 
         XCTAssertEqual(selected?.0, "g1")
         XCTAssertEqual(selected?.1, "gmail:category:promotions")
