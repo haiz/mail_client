@@ -33,6 +33,8 @@ final class SyncWorkflowTests: XCTestCase {
     }
 
     func testSyncUidDedup() async throws {
+        // v14: dedup is by message_id. Inserting the same message_id twice (simulating a
+        // re-sync of the same folder) returns the same email_id and produces one row.
         let (manager, _, store) = try await makeTestAccountManager()
         try await manager.addAccount(TestData.makeAccountConfig())
 
@@ -40,13 +42,13 @@ final class SyncWorkflowTests: XCTestCase {
             TestData.makeEmailRecord(messageId: "<dup@test>", accountId: "test-account", uid: 42)
         )
         let id2 = try await store.insertEmail(
-            TestData.makeEmailRecord(messageId: "<dup2@test>", accountId: "test-account", uid: 42)
+            TestData.makeEmailRecord(messageId: "<dup@test>", accountId: "test-account", uid: 42)
         )
 
-        XCTAssertEqual(id1, id2)
+        XCTAssertEqual(id1, id2, "Re-syncing same message_id returns the existing row id")
 
         let headers = try await store.fetchHeaders(accountId: "test-account", folder: "INBOX", offset: 0, limit: 100)
-        XCTAssertEqual(headers.count, 1)
+        XCTAssertEqual(headers.count, 1, "Re-sync does not create a duplicate")
     }
 
     func testSyncAccountIsolation() async throws {
@@ -106,6 +108,8 @@ final class SyncWorkflowTests: XCTestCase {
     }
 
     func testGmailMultiLabelSameMessage() async throws {
+        // v14: same message_id in different Gmail label folders → one canonical email row,
+        // two email_folders entries. Both folder views return the same email.
         let (manager, _, store) = try await makeTestAccountManager()
         try await manager.addAccount(TestData.makeAccountConfig())
 
@@ -116,12 +120,16 @@ final class SyncWorkflowTests: XCTestCase {
             TestData.makeEmailRecord(messageId: "<multi@gmail>", folder: "[Gmail]/Important", accountId: "test-account", uid: 200)
         )
 
-        XCTAssertNotEqual(id1, id2)
+        XCTAssertEqual(id1, id2, "Same message_id deduplicates to one canonical row")
 
         let inbox = try await store.fetchHeaders(accountId: "test-account", folder: "INBOX", offset: 0, limit: 100)
         let important = try await store.fetchHeaders(accountId: "test-account", folder: "[Gmail]/Important", offset: 0, limit: 100)
-        XCTAssertEqual(inbox.count, 1)
-        XCTAssertEqual(important.count, 1)
+        XCTAssertEqual(inbox.count, 1, "INBOX view shows the email once")
+        XCTAssertEqual(important.count, 1, "Important view shows the same email once")
+        XCTAssertEqual(inbox.first?.id, important.first?.id, "Both views reference the same email row")
+        // Each view shows its own folder-specific uid
+        XCTAssertEqual(inbox.first?.uid, 100)
+        XCTAssertEqual(important.first?.uid, 200)
     }
 
     func testSyncAllAccounts() async throws {

@@ -24,11 +24,11 @@ final class SidebarTests: XCTestCase {
         pumpRunLoop()
 
         var selectedFolder: (String, String)?
-        sidebar.onFolderSelected = { accountId, folder in
+        sidebar.onFolderSelected = { accountId, folder, _ in
             selectedFolder = (accountId, folder)
         }
 
-        sidebar.onFolderSelected?("acc1", "INBOX")
+        sidebar.onFolderSelected?("acc1", "INBOX", 0)
 
         XCTAssertEqual(selectedFolder?.0, "acc1")
         XCTAssertEqual(selectedFolder?.1, "INBOX")

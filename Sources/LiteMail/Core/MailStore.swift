@@ -357,6 +357,99 @@ actor MailStore {
             """)
         }
 
+        // v14: dedup emails by Message-ID; email_folders table tracks per-(email, folder) membership.
+        // Gmail exposes each label as an IMAP folder, so the same physical message previously
+        // appeared N times (once per label). This migration collapses duplicate rows into one
+        // canonical email row and records each folder association in email_folders.
+        // The existing labels table is left untouched — it remains for user-applied tags only.
+        migrator.registerMigration("v14_dedup_by_message_id") { db in
+            // 1. New table: tracks which IMAP folder(s) each email belongs to,
+            //    including the per-folder UID needed for move/delete operations.
+            try db.execute(sql: """
+                CREATE TABLE email_folders (
+                    email_id INTEGER NOT NULL REFERENCES emails(id) ON DELETE CASCADE,
+                    folder   TEXT NOT NULL,
+                    uid      INTEGER,
+                    PRIMARY KEY (email_id, folder)
+                )
+            """)
+            try db.execute(sql: "CREATE INDEX idx_email_folders_folder ON email_folders (folder)")
+
+            // 0. Pre-clean orphan rows left behind by v5_multi_folder_emails, which rebuilt
+            //    the emails table with foreign_keys=OFF and never wiped child rows.
+            //    These survive silently until GRDB's post-migration foreign_key_check fires.
+            try db.execute(sql: "DELETE FROM attachments  WHERE email_id NOT IN (SELECT id FROM emails)")
+            try db.execute(sql: "DELETE FROM labels       WHERE email_id NOT IN (SELECT id FROM emails)")
+            try db.execute(sql: "DELETE FROM email_bodies WHERE email_id NOT IN (SELECT id FROM emails)")
+            try db.execute(sql: "DELETE FROM delete_jobs  WHERE email_id NOT IN (SELECT id FROM emails)")
+            try db.execute(sql: "DELETE FROM snoozes      WHERE email_id NOT IN (SELECT id FROM emails)")
+
+            // 2. Backfill email_folders from all existing email rows (including duplicates).
+            //    For emails with a non-empty message_id, map to the canonical (MIN id) row.
+            //    For emails without a message_id, each maps to itself.
+            //    Uses a derived table instead of a correlated subquery to avoid O(n²) full-table
+            //    scans on large mailboxes (no index on message_id exists yet at this point).
+            try db.execute(sql: """
+                INSERT OR IGNORE INTO email_folders (email_id, folder, uid)
+                SELECT COALESCE(c.min_id, e.id), e.folder, e.uid
+                FROM emails e
+                LEFT JOIN (
+                    SELECT account_id, message_id, MIN(id) AS min_id
+                    FROM emails
+                    WHERE COALESCE(message_id, '') != ''
+                    GROUP BY account_id, message_id
+                ) c ON c.account_id = e.account_id AND c.message_id = e.message_id
+                WHERE e.folder IS NOT NULL AND e.folder != ''
+            """)
+
+            // 2.5. Remove child rows of non-canonical emails before deleting those emails.
+            //      ON DELETE CASCADE in SQLite only fires when PRAGMA foreign_keys = ON,
+            //      which GRDB disables during migration transactions that alter schema.
+            //      Without this, step 3's DELETE violates FK constraints caught by GRDB's
+            //      post-migration foreign_key_check.
+            let nonCanonical = """
+                SELECT id FROM emails
+                WHERE COALESCE(message_id, '') != ''
+                  AND id NOT IN (
+                      SELECT MIN(id) FROM emails
+                      WHERE COALESCE(message_id, '') != ''
+                      GROUP BY account_id, message_id
+                  )
+                """
+            try db.execute(sql: "DELETE FROM snoozes      WHERE email_id IN (\(nonCanonical))")
+            try db.execute(sql: "DELETE FROM delete_jobs  WHERE email_id IN (\(nonCanonical))")
+            try db.execute(sql: "DELETE FROM email_bodies WHERE email_id IN (\(nonCanonical))")
+            try db.execute(sql: "DELETE FROM attachments  WHERE email_id IN (\(nonCanonical))")
+            try db.execute(sql: "DELETE FROM labels       WHERE email_id IN (\(nonCanonical))")
+
+            // 3. Delete non-canonical duplicate email rows.
+            //    Canonical = MIN(id) per (account_id, message_id) group.
+            try db.execute(sql: """
+                DELETE FROM emails
+                WHERE COALESCE(message_id, '') != ''
+                  AND id NOT IN (
+                      SELECT MIN(id) FROM emails
+                      WHERE COALESCE(message_id, '') != ''
+                      GROUP BY account_id, message_id
+                  )
+            """)
+
+            // 4. Replace the old (account_id, folder, uid) uniqueness with (account_id, message_id).
+            try db.execute(sql: "DROP INDEX IF EXISTS idx_emails_uid")
+            // Primary dedup index: one row per (account, message).
+            try db.execute(sql: """
+                CREATE UNIQUE INDEX idx_emails_msgid
+                ON emails (account_id, message_id)
+                WHERE message_id IS NOT NULL AND message_id != ''
+            """)
+            // Fallback for emails that arrive without a Message-ID header (rare).
+            try db.execute(sql: """
+                CREATE UNIQUE INDEX idx_emails_uid_fallback
+                ON emails (account_id, folder, uid)
+                WHERE (message_id IS NULL OR message_id = '') AND uid IS NOT NULL
+            """)
+        }
+
         try migrator.migrate(dbPool)
     }
 
@@ -510,9 +603,10 @@ actor MailStore {
         try dbPool.write { db in
             try record.insert(db, onConflict: .ignore)
 
+            let emailId: Int64
             if db.changesCount > 0 {
-                // New row inserted — add FTS entry
-                let emailId = db.lastInsertedRowID
+                // New row inserted — add FTS entry.
+                emailId = db.lastInsertedRowID
                 try db.execute(
                     sql: """
                         INSERT INTO email_fts(rowid, subject, body_text, sender_name, sender_email)
@@ -520,14 +614,17 @@ actor MailStore {
                     """,
                     arguments: [emailId, record.subject, nil, record.senderName, record.senderEmail]
                 )
-                return emailId
-            } else {
-                // Row already existed (UID conflict) — return the existing row's ID.
-                // Nil-uid rows are excluded from the partial index so they can never conflict.
-                guard let uid = record.uid else {
-                    assertionFailure("insertEmail: conflict without uid — partial index should not fire for nil-uid rows")
-                    return 0
-                }
+            } else if !record.messageId.isEmpty {
+                // Conflict on (account_id, message_id) — same email seen in a different label folder.
+                let existing = try EmailRecord
+                    .filter(
+                        Column("account_id") == record.accountId &&
+                        Column("message_id") == record.messageId
+                    )
+                    .fetchOne(db)
+                emailId = existing?.id ?? 0
+            } else if let uid = record.uid {
+                // Conflict on fallback (account_id, folder, uid) for nil-message_id rows.
                 let existing = try EmailRecord
                     .filter(
                         Column("account_id") == record.accountId &&
@@ -535,8 +632,21 @@ actor MailStore {
                         Column("uid") == uid
                     )
                     .fetchOne(db)
-                return existing?.id ?? 0
+                emailId = existing?.id ?? 0
+            } else {
+                emailId = 0
             }
+
+            // Register this folder membership so fetchHeaders/listFolders find the email via
+            // email_folders JOIN. Separate from user-applied labels (the labels table).
+            if emailId > 0 {
+                try db.execute(
+                    sql: "INSERT OR IGNORE INTO email_folders (email_id, folder, uid) VALUES (?, ?, ?)",
+                    arguments: [emailId, record.folder, record.uid]
+                )
+            }
+
+            return emailId
         }
     }
 
@@ -573,11 +683,24 @@ actor MailStore {
 
     func fetchHeaders(accountId: String, folder: String, offset: Int, limit: Int) throws -> [EmailRecord] {
         try dbPool.read { db in
-            try EmailRecord
-                .filter(Column("account_id") == accountId && Column("folder") == folder && Column("is_deleted") == false && Column("delete_state") != "pending_delete")
-                .order(Column("date").desc)
-                .limit(limit, offset: offset)
-                .fetchAll(db)
+            // Join through email_folders so each result reflects the queried folder's uid context,
+            // which is needed for subsequent IMAP move/delete operations on that specific folder.
+            try EmailRecord.fetchAll(db, sql: """
+                SELECT e.id, e.message_id, e.thread_id,
+                       ef.folder AS folder,
+                       e.sender_name, e.sender_email, e.recipients, e.subject, e.date,
+                       e.is_read, e.is_starred, e.is_deleted, e.has_attachments,
+                       ef.uid AS uid,
+                       e.flags, e.references_header, e.in_reply_to, e.created_at,
+                       e.account_id, e.delete_state, e.snippet
+                FROM emails e
+                JOIN email_folders ef ON ef.email_id = e.id
+                WHERE e.account_id = ? AND ef.folder = ?
+                  AND e.is_deleted = 0
+                  AND (e.delete_state IS NULL OR e.delete_state != 'pending_delete')
+                ORDER BY e.date DESC
+                LIMIT ? OFFSET ?
+            """, arguments: [accountId, folder, limit, offset])
         }
     }
 
@@ -614,10 +737,19 @@ actor MailStore {
             args.append(limit.databaseValue)
             args.append(offset.databaseValue)
             // "INBOX" is the canonical folder name across IMAP and JMAP providers.
+            // Join through email_folders to get the per-INBOX uid for each email.
             let sql = """
-                SELECT e.* FROM emails e
+                SELECT e.id, e.message_id, e.thread_id,
+                       ef.folder AS folder,
+                       e.sender_name, e.sender_email, e.recipients, e.subject, e.date,
+                       e.is_read, e.is_starred, e.is_deleted, e.has_attachments,
+                       ef.uid AS uid,
+                       e.flags, e.references_header, e.in_reply_to, e.created_at,
+                       e.account_id, e.delete_state, e.snippet
+                FROM emails e
+                JOIN email_folders ef ON ef.email_id = e.id
                 WHERE e.account_id IN (\(placeholders))
-                  AND e.folder = 'INBOX'
+                  AND ef.folder = 'INBOX'
                   AND e.is_deleted = 0
                   AND (e.delete_state IS NULL OR e.delete_state != 'pending_delete')
                 ORDER BY e.date DESC
@@ -798,6 +930,21 @@ actor MailStore {
 
     func moveEmail(emailId: Int64, toFolder: String) throws {
         try dbPool.write { db in
+            // Remove source folder from email_folders so the email disappears from its old view.
+            let currentFolder = try String.fetchOne(
+                db, sql: "SELECT folder FROM emails WHERE id = ?", arguments: [emailId]
+            )
+            if let currentFolder {
+                try db.execute(
+                    sql: "DELETE FROM email_folders WHERE email_id = ? AND folder = ?",
+                    arguments: [emailId, currentFolder]
+                )
+            }
+            // Add destination folder (uid unknown until next sync fills it in).
+            try db.execute(
+                sql: "INSERT OR IGNORE INTO email_folders (email_id, folder, uid) VALUES (?, ?, NULL)",
+                arguments: [emailId, toFolder]
+            )
             try db.execute(sql: "UPDATE emails SET folder = ? WHERE id = ?", arguments: [toFolder, emailId])
         }
     }
@@ -863,12 +1010,31 @@ actor MailStore {
     func moveEmailBatch(emailIds: [Int64], toFolder: String) throws {
         guard !emailIds.isEmpty else { return }
         let placeholders = emailIds.map { _ in "?" }.joined(separator: ",")
-        var args: [DatabaseValueConvertible] = [toFolder]
-        args += emailIds.map { $0 as DatabaseValueConvertible }
+        let idArgs = emailIds.map { $0 as DatabaseValueConvertible }
         try dbPool.write { db in
+            // Per-email: remove source folder from email_folders, add destination folder.
+            let rows = try Row.fetchAll(
+                db,
+                sql: "SELECT id, folder FROM emails WHERE id IN (\(placeholders))",
+                arguments: StatementArguments(idArgs)
+            )
+            for row in rows {
+                let emailId: Int64 = row["id"]
+                let currentFolder: String = row["folder"]
+                try db.execute(
+                    sql: "DELETE FROM email_folders WHERE email_id = ? AND folder = ?",
+                    arguments: [emailId, currentFolder]
+                )
+                try db.execute(
+                    sql: "INSERT OR IGNORE INTO email_folders (email_id, folder, uid) VALUES (?, ?, NULL)",
+                    arguments: [emailId, toFolder]
+                )
+            }
+            var updateArgs: [DatabaseValueConvertible] = [toFolder]
+            updateArgs += emailIds.map { $0 as DatabaseValueConvertible }
             try db.execute(
                 sql: "UPDATE emails SET folder = ? WHERE id IN (\(placeholders))",
-                arguments: StatementArguments(args)
+                arguments: StatementArguments(updateArgs)
             )
         }
     }
@@ -1043,9 +1209,13 @@ actor MailStore {
     /// Returns (emailId, uid) for every pending_delete row in the given folder.
     func fetchPendingDeleteUids(accountId: String, folder: String) throws -> [(emailId: Int64, uid: Int)] {
         try dbPool.read { db in
+            // Use the per-folder uid from email_folders: correct uid for IMAP ops in that folder.
             let rows = try Row.fetchAll(db, sql: """
-                SELECT id, uid FROM emails
-                WHERE account_id = ? AND folder = ? AND delete_state = 'pending_delete' AND uid IS NOT NULL
+                SELECT e.id, ef.uid FROM emails e
+                JOIN email_folders ef ON ef.email_id = e.id
+                WHERE e.account_id = ? AND ef.folder = ?
+                  AND e.delete_state = 'pending_delete'
+                  AND ef.uid IS NOT NULL
             """, arguments: [accountId, folder])
             return rows.map { (emailId: $0["id"], uid: $0["uid"]) }
         }
@@ -1114,20 +1284,23 @@ actor MailStore {
 
     // MARK: - Folders
 
-    func listFolders(accountId: String) throws -> [(folder: String, totalCount: Int, hasUnread: Bool)] {
+    func listFolders(accountId: String) throws -> [(folder: String, totalCount: Int, unreadCount: Int)] {
         try dbPool.read { db in
-            // Join sync_state (all known folders) with emails (may be empty for Drafts/Spam etc.)
+            // Drive folder list from sync_state (every folder we have synced) but count
+            // through email_folders so each email is counted exactly once per folder, even if it
+            // belongs to multiple folders (Gmail multi-label scenario).
             let rows = try Row.fetchAll(db, sql: """
                 SELECT ss.folder,
                        COALESCE(SUM(CASE WHEN e.is_deleted = 0 AND e.delete_state <> 'pending_delete' THEN 1 ELSE 0 END), 0) AS total_count,
                        COALESCE(SUM(CASE WHEN e.is_read = 0 AND e.is_deleted = 0 AND e.delete_state <> 'pending_delete' THEN 1 ELSE 0 END), 0) AS unread_count
                 FROM sync_state ss
-                LEFT JOIN emails e ON e.folder = ss.folder AND e.account_id = ss.account_id
+                LEFT JOIN email_folders ef ON ef.folder = ss.folder
+                LEFT JOIN emails e ON e.id = ef.email_id AND e.account_id = ss.account_id
                 WHERE ss.account_id = ?
                 GROUP BY ss.folder
                 ORDER BY ss.folder
             """, arguments: [accountId])
-            return rows.map { (folder: $0["folder"], totalCount: $0["total_count"], hasUnread: ($0["unread_count"] as Int) > 0) }
+            return rows.map { (folder: $0["folder"], totalCount: $0["total_count"], unreadCount: $0["unread_count"] as Int) }
         }
     }
 
@@ -1305,7 +1478,11 @@ actor MailStore {
         try dbPool.read { db in
             try Int.fetchOne(
                 db,
-                sql: "SELECT COUNT(*) FROM emails WHERE account_id = ? AND folder = ? AND is_deleted = 0",
+                sql: """
+                    SELECT COUNT(DISTINCT e.id) FROM emails e
+                    JOIN email_folders ef ON ef.email_id = e.id
+                    WHERE e.account_id = ? AND ef.folder = ? AND e.is_deleted = 0
+                """,
                 arguments: [accountId, folder]
             ) ?? 0
         }

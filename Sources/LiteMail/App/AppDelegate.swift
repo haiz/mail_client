@@ -1,6 +1,6 @@
 import AppKit
 
-final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, @unchecked Sendable {
     private var windowController: MainWindowController?
     private var accountManager: AccountManager?
     private var currentAccountId: String?
@@ -37,11 +37,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         let wc = MainWindowController()
         windowController = wc
 
-        wc.onFolderSelected = { [weak self] accountId, folder in
+        wc.onFolderSelected = { [weak self] accountId, folder, totalCount in
             self?.currentAccountId = accountId
             self?.currentFolder = folder
             self?.displayedEmailId = nil
             self?.windowController?.messageListView.currentFolderName = folder
+            self?.windowController?.messageListView.currentFolderTotal = totalCount
             self?.loadMessages()
         }
         wc.onMessageSelected = { [weak self] header in
@@ -188,6 +189,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         editMenuItem.submenu = editMenu
         mainMenu.addItem(editMenuItem)
 
+        let viewMenuItem = NSMenuItem()
+        let viewMenu = NSMenu(title: "View")
+        let toggleItem = viewMenu.addItem(withTitle: "Hide Sidebar", action: #selector(toggleSidebar), keyEquivalent: "s")
+        toggleItem.keyEquivalentModifierMask = [.command, .control]
+        toggleItem.tag = 1001
+        viewMenuItem.submenu = viewMenu
+        mainMenu.addItem(viewMenuItem)
+
         let msgMenuItem = NSMenuItem()
         let msgMenu = NSMenu(title: "Message")
         msgMenu.addItem(withTitle: "Reply All", action: #selector(replyAllMessage), keyEquivalent: "r")
@@ -274,10 +283,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
             loadScheduledMessages()
             return
         }
-        if currentAccountId == AccountManager.unifiedAccountId {
-            loadUnifiedInbox()
-            return
-        }
         guard let accountManager, let accountId = currentAccountId else { return }
         // Reset pagination state. Every folder/account switch and every action
         // that calls loadMessages should start from a clean page.
@@ -335,24 +340,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         }
     }
 
-    private func loadUnifiedInbox() {
-        guard let accountManager else { return }
-        isLoadingMoreMessages = false
-        hasMoreMessages = true
-        let limit = DisplayPreferences.emailListLimit
-        Task { @MainActor in
-            do {
-                let headers = try await accountManager.fetchUnifiedInbox(offset: 0, limit: limit)
-                windowController?.messageListView.update(messages: headers)
-                hasMoreMessages = headers.count >= limit
-                windowController?.messageListView.setCanLoadMore(hasMoreMessages && !isSearching)
-            } catch {
-                showError("Failed to load unified inbox: \(error.localizedDescription)")
-            }
-        }
-    }
-
-    /// Fetch the next page and append it to the message list. Fired by
+/// Fetch the next page and append it to the message list. Fired by
     /// MessageListView when the user scrolls near the bottom.
     private func loadMoreMessages() {
         guard let accountManager, let accountId = currentAccountId else { return }
@@ -957,6 +945,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
 
     // MARK: - Menu Actions
 
+    @objc private func toggleSidebar() {
+        windowController?.toggleSidebar()
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.tag == 1001 {
+            let collapsed = windowController?.isSidebarCollapsed ?? false
+            menuItem.title = collapsed ? "Show Sidebar" : "Hide Sidebar"
+            return windowController != nil
+        }
+        return true
+    }
+
     @objc private func composeNewMessage() { openComposer(mode: .compose) }
 
     @objc private func replyAllMessage() {
@@ -1255,6 +1256,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
             let accountList = accounts.map { (id: $0.id, email: $0.emailAddress) }
             windowController?.sidebarView.setAccounts(accountList, activeId: currentAccountId)
 
+            // Show active account in title bar (visible when sidebar is collapsed)
+            let activeEmail = accounts.first(where: { $0.id == currentAccountId })?.emailAddress
+            windowController?.setActiveAccountTitle(activeEmail)
+
             // Load folders for the active account
             loadFoldersForCurrentAccount()
         }
@@ -1272,28 +1277,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
 
     private func switchAccount(_ accountId: String) {
         currentAccountId = accountId
-        if accountId == AccountManager.unifiedAccountId {
-            currentFolder = "INBOX"
-            displayedEmailId = nil
-            loadMessages()
-            return
-        }
         UserDefaults.standard.set(accountId, forKey: "lastActiveAccountId")
         activatedAccountIds.insert(accountId)
         currentFolder = "INBOX"
         displayedEmailId = nil
-        loadFoldersForCurrentAccount()
+        loadSidebar()
         loadMessages()
         Task { await performSyncCycle() }
     }
 
     private static func defaultFolders() -> [MailFolder] {
         [
-            MailFolder(id: "INBOX", name: "Inbox", totalCount: 0, hasUnread: false, role: .inbox),
-            MailFolder(id: "[Gmail]/Starred", name: "Starred", totalCount: 0, hasUnread: false, role: .starred),
-            MailFolder(id: "[Gmail]/Sent Mail", name: "Sent", totalCount: 0, hasUnread: false, role: .sent),
-            MailFolder(id: "[Gmail]/Drafts", name: "Drafts", totalCount: 0, hasUnread: false, role: .drafts),
-            MailFolder(id: "[Gmail]/Trash", name: "Trash", totalCount: 0, hasUnread: false, role: .trash),
+            MailFolder(id: "INBOX", name: "Inbox", totalCount: 0, unreadCount: 0, role: .inbox),
+            MailFolder(id: "[Gmail]/Starred", name: "Starred", totalCount: 0, unreadCount: 0, role: .starred),
+            MailFolder(id: "[Gmail]/Sent Mail", name: "Sent", totalCount: 0, unreadCount: 0, role: .sent),
+            MailFolder(id: "[Gmail]/Drafts", name: "Drafts", totalCount: 0, unreadCount: 0, role: .drafts),
+            MailFolder(id: "[Gmail]/Trash", name: "Trash", totalCount: 0, unreadCount: 0, role: .trash),
         ]
     }
 

@@ -113,8 +113,8 @@ final class MailStoreTests: XCTestCase {
     }
 
     func testNilUidNeverConflicts() async throws {
-        // Emails with uid=nil are not covered by the partial index.
-        // Two nil-uid emails with the same message_id can coexist (edge case: demo/offline data).
+        // v14: emails with the same non-empty message_id are deduplicated regardless of uid.
+        // Two inserts with the same message_id return the same email_id (one canonical row).
         let r1 = makeEmail(messageId: "<no-uid@example.com>", uid: nil)
         let r2 = makeEmail(messageId: "<no-uid@example.com>", uid: nil)
 
@@ -122,21 +122,28 @@ final class MailStoreTests: XCTestCase {
         let id2 = try await store.insertEmail(r2)
 
         XCTAssertGreaterThan(id1, 0)
-        XCTAssertGreaterThan(id2, 0)
-        // Both rows stored — no UID to deduplicate on
+        XCTAssertEqual(id1, id2, "Same message_id returns same email_id")
         let count = try await store.emailCount(accountId: testAccountId)
-        XCTAssertEqual(count, 2, "Both nil-uid rows should be stored independently")
+        XCTAssertEqual(count, 1, "Duplicate message_id produces exactly one email row")
     }
 
     func testSameMessageIdInDifferentFoldersAllowed() async throws {
-        // Gmail multi-label model: same message can appear in INBOX and a label folder
+        // Gmail multi-label model: same message in INBOX and a label folder →
+        // one email row, two label rows, accessible from both folder views.
         let inboxRecord = makeEmail(messageId: "<multi@example.com>", folder: "INBOX")
         let labelRecord = makeEmail(messageId: "<multi@example.com>", folder: "Work")
         let id1 = try await store.insertEmail(inboxRecord)
         let id2 = try await store.insertEmail(labelRecord)
         XCTAssertGreaterThan(id1, 0)
-        XCTAssertGreaterThan(id2, 0)
-        XCTAssertNotEqual(id1, id2)
+        XCTAssertEqual(id1, id2, "Same message_id in different folders deduplicates to one row")
+        let count = try await store.emailCount(accountId: testAccountId)
+        XCTAssertEqual(count, 1, "Only one unique email exists")
+        // Both folders should be queryable via fetchHeaders (each returns the same email)
+        let inboxResults = try await store.fetchHeaders(accountId: testAccountId, folder: "INBOX", offset: 0, limit: 10)
+        let workResults = try await store.fetchHeaders(accountId: testAccountId, folder: "Work", offset: 0, limit: 10)
+        XCTAssertEqual(inboxResults.count, 1)
+        XCTAssertEqual(workResults.count, 1)
+        XCTAssertEqual(inboxResults.first?.id, workResults.first?.id)
     }
 
     // MARK: - Search Tests

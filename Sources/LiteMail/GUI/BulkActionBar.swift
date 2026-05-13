@@ -47,6 +47,7 @@ final class BulkActionBar: NSView {
         selectAllButton.font = .systemFont(ofSize: 11)
         selectAllButton.contentTintColor = .linkColor
         selectAllButton.setContentHuggingPriority(.required, for: .horizontal)
+        selectAllButton.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         deselectButton = NSButton(title: "Deselect All", target: nil, action: nil)
         deselectButton.bezelStyle = .inline
@@ -54,6 +55,7 @@ final class BulkActionBar: NSView {
         deselectButton.font = .systemFont(ofSize: 11)
         deselectButton.contentTintColor = .linkColor
         deselectButton.setContentHuggingPriority(.required, for: .horizontal)
+        deselectButton.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         // Action buttons — SF Symbols, toolbar style matching DetailView
         func makeButton(_ symbolName: String, _ description: String) -> CursorButton {
@@ -81,18 +83,21 @@ final class BulkActionBar: NSView {
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
-        // Horizontal stack: [countLabel] [selectAll] [deselectAll] [spacer] [archive] [delete] [read] [star] [move] [spam]
+        // Compact group for action icons — 4pt gaps keep them visually tight
+        let actionStack = NSStackView(views: [
+            archiveButton, deleteButton, markReadButton, starButton, moveButton, spamButton,
+        ])
+        actionStack.orientation = .horizontal
+        actionStack.alignment = .centerY
+        actionStack.spacing = 2
+
+        // Horizontal stack: [countLabel] [selectAll] [deselectAll] [spacer] [actionStack]
         stackView = NSStackView(views: [
             countLabel,
             selectAllButton,
             deselectButton,
             spacer,
-            archiveButton,
-            deleteButton,
-            markReadButton,
-            starButton,
-            moveButton,
-            spamButton,
+            actionStack,
         ])
         stackView.orientation = .horizontal
         stackView.alignment = .centerY

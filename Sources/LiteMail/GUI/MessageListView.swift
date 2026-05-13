@@ -55,6 +55,9 @@ final class MessageListView: NSObject {
     private var chipBarHeightConstraint: NSLayoutConstraint!
     private var activeChips: [String] = []
 
+    private let countLabel = NSTextField(labelWithString: "")
+    private var countLabelHeightConstraint: NSLayoutConstraint!
+
     var onSaveSearch: ((String) -> Void)?
 
     // Keyboard navigation callbacks
@@ -93,6 +96,11 @@ final class MessageListView: NSObject {
     /// The name of the currently displayed folder, used for the empty state subtitle.
     var currentFolderName: String = "Inbox" {
         didSet { updateEmptyState() }
+    }
+
+    /// Total email count for the current folder, shown in the list header.
+    var currentFolderTotal: Int = 0 {
+        didSet { updateCountLabel() }
     }
 
     // Empty state overlay
@@ -147,10 +155,17 @@ final class MessageListView: NSObject {
         chipBar.edgeInsets = NSEdgeInsets(top: 2, left: 8, bottom: 2, right: 8)
         chipBar.translatesAutoresizingMaskIntoConstraints = false
 
+        // Count label — shows total email count for current folder, hidden during search
+        countLabel.font = .systemFont(ofSize: 11)
+        countLabel.textColor = .secondaryLabelColor
+        countLabel.alignment = .left
+        countLabel.translatesAutoresizingMaskIntoConstraints = false
+
         // Container
         let container = NSView()
         bulkActionBar.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(searchField)
+        container.addSubview(countLabel)
         container.addSubview(chipBar)
         container.addSubview(bulkActionBar)
         container.addSubview(scrollView)
@@ -158,6 +173,7 @@ final class MessageListView: NSObject {
         // BulkActionBar height: 0 when hidden, 36 when visible
         bulkBarHeightConstraint = bulkActionBar.heightAnchor.constraint(equalToConstant: 0)
         chipBarHeightConstraint = chipBar.heightAnchor.constraint(equalToConstant: 0)
+        countLabelHeightConstraint = countLabel.heightAnchor.constraint(equalToConstant: 0)
 
         NSLayoutConstraint.activate([
             searchField.topAnchor.constraint(equalTo: container.topAnchor, constant: 8),
@@ -165,7 +181,12 @@ final class MessageListView: NSObject {
             searchField.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
             searchField.heightAnchor.constraint(equalToConstant: 28),
 
-            chipBar.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 2),
+            countLabel.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 2),
+            countLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
+            countLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
+            countLabelHeightConstraint,
+
+            chipBar.topAnchor.constraint(equalTo: countLabel.bottomAnchor, constant: 2),
             chipBar.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             chipBar.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             chipBarHeightConstraint,
@@ -337,6 +358,18 @@ final class MessageListView: NSObject {
         emptyStateView.isHidden = !threadGroups.isEmpty
     }
 
+    private func updateCountLabel() {
+        let isSearching = !searchField.stringValue.isEmpty
+        if currentFolderTotal > 0 && !isSearching {
+            let noun = currentFolderTotal == 1 ? "message" : "messages"
+            countLabel.stringValue = "\(currentFolderTotal) \(noun)"
+            countLabelHeightConstraint.constant = 18
+        } else {
+            countLabel.stringValue = ""
+            countLabelHeightConstraint.constant = 0
+        }
+    }
+
     func update(messages: [EmailHeader]) {
         let previouslySelectedId = selectedHeader?.id
         self.messages = messages
@@ -501,6 +534,7 @@ final class MessageListView: NSObject {
     @objc private func searchFieldChanged() {
         let raw = searchField.stringValue
         updateChipBar(for: raw)
+        updateCountLabel()
         onSearchChanged?(raw)
     }
 

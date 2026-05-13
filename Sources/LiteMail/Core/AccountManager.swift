@@ -254,10 +254,10 @@ actor AccountManager: MailEngineProtocol {
 
     func listFolders(accountId: String) async throws -> [MailFolder] {
         let folders = try await store.listFolders(accountId: accountId)
-        var result = folders.map { MailFolder(id: $0.folder, name: Self.displayName(for: $0.folder), totalCount: $0.totalCount, hasUnread: $0.hasUnread, role: Self.folderRole(for: $0.folder)) }
+        var result = folders.map { MailFolder(id: $0.folder, name: Self.displayName(for: $0.folder), totalCount: $0.totalCount, unreadCount: $0.unreadCount, role: Self.folderRole(for: $0.folder)) }
         let scheduledCount = (try? await store.scheduledCount(accountId: accountId)) ?? 0
         let scheduled = MailFolder(id: "__scheduled__", name: "Scheduled",
-                                   totalCount: scheduledCount, hasUnread: false, role: .scheduled)
+                                   totalCount: scheduledCount, unreadCount: 0, role: .scheduled)
         if let draftsIdx = result.firstIndex(where: { $0.role == .drafts }) {
             result.insert(scheduled, at: draftsIdx + 1)
         } else {
@@ -266,7 +266,7 @@ actor AccountManager: MailEngineProtocol {
 
         let snoozedCount = (try? await store.snoozedCount(accountId: accountId)) ?? 0
         let snoozed = MailFolder(id: "__snoozed__", name: "Snoozed",
-                                 totalCount: snoozedCount, hasUnread: false, role: .snoozed)
+                                 totalCount: snoozedCount, unreadCount: 0, role: .snoozed)
         result.append(snoozed)
 
         return result

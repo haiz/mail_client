@@ -12,7 +12,7 @@ final class SidebarView: NSObject {
     private let outlineView: NSOutlineView
 
     /// Called when a folder is selected. (accountId, folderId)
-    var onFolderSelected: ((String, String) -> Void)?
+    var onFolderSelected: ((String, String, Int) -> Void)?
     /// Called when an email is dragged and dropped onto a folder. (emailId, folderId)
     var onMoveToFolder: ((Int64, String) -> Void)?
     /// Called when user switches account via the dropdown.
@@ -169,6 +169,7 @@ final class SidebarView: NSObject {
                 icon: Self.iconForFolder(folder.id, role: folder.role),
                 folderId: folder.id,
                 totalCount: folder.totalCount > 0 ? folder.totalCount : nil,
+                unreadCount: folder.unreadCount > 0 ? folder.unreadCount : nil,
                 hasUnread: folder.hasUnread,
                 accountId: currentAccountId,
                 role: folder.role
@@ -194,9 +195,7 @@ final class SidebarView: NSObject {
         categoryItems.sort { $0.title < $1.title }
         labelItems.sort { $0.title < $1.title }
 
-        // Always prepend "All Inboxes" for multi-account unified view
-        let allInboxesItem = SidebarItem(title: "All Inboxes", icon: "tray.2.fill", folderId: "__unified__")
-        var items = [allInboxesItem] + systemItems
+        var items = systemItems
         if !categoryItems.isEmpty {
             items.append(SidebarItem(title: "Categories", children: categoryItems))
         }
@@ -311,7 +310,6 @@ final class SidebarView: NSObject {
 
     private func loadDefaultMailboxes() {
         let defaults: [(String, String, String, FolderRole?)] = [
-            ("All Inboxes", "tray.2.fill", "__unified__", nil),
             ("Inbox", "tray.fill", "INBOX", .inbox),
             ("Starred", "star.fill", "[Gmail]/Starred", .starred),
             ("Sent", "paperplane.fill", "[Gmail]/Sent Mail", .sent),
@@ -502,7 +500,7 @@ extension SidebarView: NSOutlineViewDelegate {
         }
 
         let badgeField = cell.subviews.first { $0.identifier?.rawValue == "badge" } as? NSTextField
-        if let count = sidebarItem.totalCount, count > 0 {
+        if let count = sidebarItem.unreadCount, count > 0 {
             badgeField?.stringValue = "\(count)"
             badgeField?.isHidden = false
         } else {
@@ -522,12 +520,8 @@ extension SidebarView: NSOutlineViewDelegate {
             }
             return
         }
-        if folderId == "__unified__" {
-            onAccountSwitched?("__unified__")
-            return
-        }
         let accountId = item.accountId ?? currentAccountId ?? "default"
-        onFolderSelected?(accountId, folderId)
+        onFolderSelected?(accountId, folderId, item.totalCount ?? 0)
     }
 }
 
@@ -788,6 +782,7 @@ private class SidebarItem {
     let icon: String?
     let folderId: String?
     var totalCount: Int?
+    var unreadCount: Int?
     var hasUnread: Bool
     var accountId: String?
     var role: FolderRole?
@@ -798,11 +793,12 @@ private class SidebarItem {
 
     /// Leaf folder item.
     init(title: String, icon: String? = nil, folderId: String? = nil, totalCount: Int? = nil,
-         hasUnread: Bool = false, accountId: String? = nil, role: FolderRole? = nil) {
+         unreadCount: Int? = nil, hasUnread: Bool = false, accountId: String? = nil, role: FolderRole? = nil) {
         self.title = title
         self.icon = icon
         self.folderId = folderId
         self.totalCount = totalCount
+        self.unreadCount = unreadCount
         self.hasUnread = hasUnread
         self.accountId = accountId
         self.role = role
@@ -814,6 +810,7 @@ private class SidebarItem {
         self.icon = nil
         self.folderId = nil
         self.totalCount = nil
+        self.unreadCount = nil
         self.hasUnread = false
         self.accountId = nil
         self.role = nil

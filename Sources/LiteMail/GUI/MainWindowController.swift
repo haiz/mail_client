@@ -13,9 +13,19 @@ final class MainWindowController: NSObject {
     let undoToastView = UndoToastView()
     private var commandPalette: CommandPalette?
     private var keyboardMonitor: Any?
+    private var sidebarMinWidthConstraint: NSLayoutConstraint!
+    private var sidebarToolbarButton: NSButton?
+
+    private static let sidebarToolbarItemID = NSToolbarItem.Identifier("toggleSidebar")
+
+    private static let sidebarCollapsedKey = "sidebarCollapsed"
+
+    var isSidebarCollapsed: Bool {
+        UserDefaults.standard.bool(forKey: Self.sidebarCollapsedKey)
+    }
 
     /// Callback when a folder is selected in the sidebar. (accountId, folderId)
-    var onFolderSelected: ((String, String) -> Void)?
+    var onFolderSelected: ((String, String, Int) -> Void)?
     /// Callback when a message is selected in the list.
     var onMessageSelected: ((EmailHeader) -> Void)?
     /// Callback for actions from command palette or keyboard.
@@ -33,9 +43,7 @@ final class MainWindowController: NSObject {
         window.center()
         window.minSize = NSSize(width: 800, height: 500)
         window.titlebarAppearsTransparent = true
-        window.titleVisibility = .hidden
-        window.toolbar = NSToolbar()
-        window.toolbarStyle = .unified
+        window.titleVisibility = .visible
 
         // Split view
         splitView = CursorSplitView()
@@ -49,6 +57,8 @@ final class MainWindowController: NSObject {
         statusBar = StatusBar()
 
         super.init()
+
+        setupToolbar()
 
         // Message list column: message list (contains BulkActionBar internally) + UndoToastView floating
         let messageColumn = NSView()
@@ -79,7 +89,8 @@ final class MainWindowController: NSObject {
         splitView.setHoldingPriority(.defaultLow, forSubviewAt: 2)
 
         // Set initial widths
-        sidebarView.view.widthAnchor.constraint(greaterThanOrEqualToConstant: 180).isActive = true
+        sidebarMinWidthConstraint = sidebarView.view.widthAnchor.constraint(greaterThanOrEqualToConstant: 180)
+        sidebarMinWidthConstraint.isActive = true
         messageColumn.widthAnchor.constraint(greaterThanOrEqualToConstant: 280).isActive = true
 
         // Main container with split view + status bar
@@ -104,8 +115,8 @@ final class MainWindowController: NSObject {
         splitView.delegate = self
 
         // Wire callbacks
-        sidebarView.onFolderSelected = { [weak self] accountId, folder in
-            self?.onFolderSelected?(accountId, folder)
+        sidebarView.onFolderSelected = { [weak self] accountId, folder, totalCount in
+            self?.onFolderSelected?(accountId, folder, totalCount)
         }
         messageListView.onMessageSelected = { [weak self] header in
             self?.onMessageSelected?(header)
@@ -171,9 +182,51 @@ final class MainWindowController: NSObject {
 
         // Set initial divider positions after layout
         DispatchQueue.main.async { [self] in
-            splitView.setPosition(200, ofDividerAt: 0)
-            splitView.setPosition(540, ofDividerAt: 1)
+            splitView.setPosition(isSidebarCollapsed ? 0 : 200, ofDividerAt: 0)
+            splitView.setPosition(isSidebarCollapsed ? 340 : 540, ofDividerAt: 1)
+            sidebarMinWidthConstraint.isActive = !isSidebarCollapsed
+            sidebarToolbarButton?.state = isSidebarCollapsed ? .off : .on
         }
+    }
+
+    private func setupToolbar() {
+        let toolbar = NSToolbar(identifier: "MainToolbar.v2")
+        toolbar.delegate = self
+        toolbar.displayMode = .iconOnly
+        toolbar.allowsUserCustomization = false
+        toolbar.autosavesConfiguration = false
+        window.toolbar = toolbar
+        window.toolbarStyle = .unified
+    }
+
+    func setActiveAccountTitle(_ email: String?) {
+        window.title = email.map { "LiteMail — \($0)" } ?? "LiteMail"
+    }
+
+    @objc func toggleSidebar() {
+        setSidebarCollapsed(!isSidebarCollapsed, animated: true)
+    }
+
+    private func setSidebarCollapsed(_ collapsed: Bool, animated: Bool) {
+        UserDefaults.standard.set(collapsed, forKey: Self.sidebarCollapsedKey)
+        sidebarMinWidthConstraint.isActive = !collapsed
+        let sidebarPos: CGFloat = collapsed ? 0 : 200
+        // Keep message list width constant: shift divider 1 by sidebar width
+        let msgWidth = splitView.arrangedSubviews[1].frame.width
+        let divider1Pos: CGFloat = collapsed ? msgWidth : 200 + msgWidth
+        if animated {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.2
+                ctx.allowsImplicitAnimation = true
+                self.splitView.animator().setPosition(sidebarPos, ofDividerAt: 0)
+                self.splitView.animator().setPosition(divider1Pos, ofDividerAt: 1)
+            }
+        } else {
+            splitView.setPosition(sidebarPos, ofDividerAt: 0)
+            splitView.setPosition(divider1Pos, ofDividerAt: 1)
+        }
+        sidebarToolbarButton?.state = collapsed ? .off : .on
+        NSApp.mainMenu?.update()
     }
 
     deinit {
@@ -299,9 +352,13 @@ final class MainWindowController: NSObject {
 // MARK: - NSSplitViewDelegate
 
 extension MainWindowController: NSSplitViewDelegate {
+    func splitView(_ splitView: NSSplitView, canCollapseSubview subview: NSView) -> Bool {
+        subview === sidebarView.view
+    }
+
     func splitView(_ splitView: NSSplitView, constrainMinCoordinate proposedMinimumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
         switch dividerIndex {
-        case 0: return 150  // Sidebar min width
+        case 0: return 0    // Allow collapse to 0; canCollapseSubview guards manual drag
         case 1: return 300  // Message list min width (from left edge)
         default: return proposedMinimumPosition
         }
@@ -312,6 +369,38 @@ extension MainWindowController: NSSplitViewDelegate {
         case 0: return 250  // Sidebar max width
         default: return proposedMaximumPosition
         }
+    }
+}
+
+// MARK: - NSToolbarDelegate
+
+extension MainWindowController: NSToolbarDelegate {
+    func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        guard itemIdentifier == Self.sidebarToolbarItemID else { return nil }
+
+        let button = NSButton()
+        button.image = NSImage(systemSymbolName: "sidebar.left", accessibilityDescription: "Toggle Sidebar")
+        button.bezelStyle = .texturedRounded
+        button.setButtonType(.toggle)
+        button.state = isSidebarCollapsed ? .off : .on
+        button.target = self
+        button.action = #selector(toggleSidebar)
+        button.toolTip = "Toggle Sidebar (⌃⌘S)"
+        sidebarToolbarButton = button
+
+        let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+        item.view = button
+        item.label = "Sidebar"
+        item.paletteLabel = "Toggle Sidebar"
+        return item
+    }
+
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        [Self.sidebarToolbarItemID, .flexibleSpace]
+    }
+
+    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        [Self.sidebarToolbarItemID, .flexibleSpace, .space]
     }
 }
 

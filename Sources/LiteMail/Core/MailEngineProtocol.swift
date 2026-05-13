@@ -156,7 +156,8 @@ struct MailFolder: Sendable, Identifiable {
     let id: String
     let name: String
     let totalCount: Int
-    let hasUnread: Bool
+    let unreadCount: Int
+    var hasUnread: Bool { unreadCount > 0 }
     let role: FolderRole?
 }
 
