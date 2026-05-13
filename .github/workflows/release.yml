@@ -1,0 +1,40 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  build-and-upload:
+    runs-on: macos-14
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build release binary
+        run: swift build -c release
+
+      - name: Assemble app bundle
+        run: |
+          APP_NAME="LiteMail"
+          BUILD_DIR=".build/release"
+          APP_PATH="staging/${APP_NAME}.app"
+
+          mkdir -p "${APP_PATH}/Contents/MacOS"
+          mkdir -p "${APP_PATH}/Contents/Resources"
+
+          cp "${BUILD_DIR}/${APP_NAME}"                    "${APP_PATH}/Contents/MacOS/"
+          cp "Sources/LiteMail/Resources/Info.plist"       "${APP_PATH}/Contents/"
+          cp "Sources/LiteMail/Resources/AppIcon.icns"     "${APP_PATH}/Contents/Resources/"
+
+          for bundle in "${BUILD_DIR}"/*.bundle; do
+              cp -r "$bundle" "${APP_PATH}/Contents/Resources/"
+          done
+
+          codesign --force --deep --sign - "${APP_PATH}"
+          ditto -ck --keepParent "${APP_PATH}" "staging/${APP_NAME}.zip"
+
+      - name: Upload release asset
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ github.ref_name }}" "staging/LiteMail.zip" --clobber
