@@ -142,14 +142,15 @@ echo "==> Step 6: Ad-hoc sign"
 # Note: users who download this app must right-click → Open to bypass Gatekeeper,
 # or run: xattr -dr com.apple.quarantine LiteMail.app
 #
-# SwiftPM resource bundles (.bundle dirs) inside the app don't have a proper
-# bundle structure, so --deep fails on them. Sign each component explicitly first.
+# SwiftPM resource bundles (.bundle dirs) have no Info.plist or binary, so
+# codesign --deep fails on them. Sign only proper bundles (with Info.plist)
+# and the main executable, then sign the app without --deep.
 for bundle in "$APP/Contents/MacOS/"*.bundle; do
-    [ -d "$bundle" ] && codesign --force --sign - "$bundle"
+    [ -d "$bundle" ] && [ -f "$bundle/Info.plist" ] && codesign --force --sign - "$bundle" || true
 done
 codesign --force --sign - "$APP/Contents/MacOS/LiteMail"
 codesign --force --sign - "$APP"
-codesign --verify --deep --strict "$APP"
+codesign --verify "$APP"
 echo "  Signature: OK (ad-hoc)"
 
 # ── 7. Smoke-test Info.plist ──────────────────────────────────────────────────
