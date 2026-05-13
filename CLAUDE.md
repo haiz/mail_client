@@ -84,6 +84,10 @@ docker compose -f docker-compose.test.yml down     # Stop GreenMail
 LITEMAIL_GMAIL_TEST=1 LITEMAIL_GMAIL_EMAIL=... LITEMAIL_GMAIL_PASSWORD=... swift test --filter GmailSmokeTests
 LITEMAIL_JMAP_TEST=1 LITEMAIL_JMAP_EMAIL=... LITEMAIL_JMAP_URL=... LITEMAIL_JMAP_TOKEN=... swift test --filter JMAPSmokeTests
 ```
+## Release
+
+Before tagging any release, update `VERSION` and `Sources/LiteMail/Resources/Info.plist` (CFBundleShortVersionString) to match the new tag.
+
 ## Skill routing
 
 When the user's request matches an available skill, ALWAYS invoke it using the Skill
