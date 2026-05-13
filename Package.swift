@@ -25,6 +25,7 @@ let package = Package(
                 .product(name: "JMAPClient", package: "swift-jmap-client"),
             ],
             path: "Sources/LiteMail",
+            exclude: ["Resources/Info.plist"],
             resources: [.process("Resources")]
         ),
         .testTarget(
